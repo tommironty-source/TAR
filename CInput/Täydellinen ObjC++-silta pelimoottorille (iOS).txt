@@ -1,0 +1,36 @@
+Kun kyseessä on "täydellinen" Objective-C++-silta iOS-pelimoottorille, ydinajatus on: **älä yritä kääriä koko C++-ydintä puhtaaksi Objective-C:ksi, vaan käytä `.mm`-tiedostoja ohuen kerroksen liimana ja anna suorituskykykriittisen logiikan pysyä C++:ssa.** Flutterin iOS-moottorin viralliset kehittäjät ovat myös selkeästi torjuneet ehdotukset "C++-rajapinnan käärimisestä puhtaaksi ObjC:ksi" ja todenneet, että käärekerroksella on vähän arvoa ja se tuo turhia kustannuksia.
+
+### 1. Ydinarkkitehtuuri: `.mm`-tiedostot + C++-ydin
+
+Tämä on kypsin ja eniten tuotantoympäristössä todistettu tapa. Pelimoottorin matematiikka, fysiikka, renderöintikomennot ja muut pysyvät C++:ssa; Objective-C++ vastaa vain seuraavista:
+
+- **Vastaanottamaan UIKit-syötteitä**: kuten kosketuskoordinaatit, näkymän kierto, aikapäivitykset.
+- **Välittämään takaisinkutsuja**: C++-ytimen tapahtumat (kuten pelin päättyminen, mainospyynnöt) välitetään takaisin ObjC-kerrokselle ja suoritetaan pääsäikeessä.
+
+SitePointin jakama NDK-peliesimerkki "Endless Tunnel" siirrettiin iOS:lle juuri tällä tavalla: View Controller hallinnoi pelisilmukkaa ja syöttää `time delta` ja kosketuskoordinaatit suoraan C++-ytimeen, samalla kun GLKit hoitaa renderöinnin, saavuttaen 60 FPS:n natiivin suorituskyvyn.
+
+### 2. Suositellut apuvälineet ja kehykset
+
+**Djinni (Dropboxin avoimen lähdekoodin, nykyään yhteisön ylläpitämä)**
+Jos pelimoottorissasi on paljon ristikkäisiä tietotyyppejä (struct, enum, callback-rajapinnat), voit kirjoittaa IDL-kuvauksen ja antaa D jinnen automaattisesti generoida C++ ↔ Objective-C++ -sidontakoodin. Se tukee myös poikkeusten automaattista muuntamista (C++ `std::exception` → `NSException`). Tämä vähentää merkittävästi käsityönä kirjoitettavan liimakoodin määrää.
+
+**metal-cpp (Applen virallinen)**
+Jos pelimoottorisi renderöintikerros käyttää Metalia, Applen virallinen `metal-cpp` on paras referenssi "täydelliselle sillalle". Se on header-only-kirjasto, joka toteuttaa suoran C++-kutsun Metal-olioihin Objective-C-runtimen kautta, **ei mitattavissa olevaa ylimääräistä suorituskykykustannusta** (koska C++-funktiot inlineytetään), eikä käytä ylimääräisiä allokointeja vaativia kääresäiliöitä. Huomio: metal-cpp:n C++-oliot **eivät kuulu ARC:n piiriin**, muistinhallinta on hoidettava manuaalisesti Cocoa-sääntöjen mukaisesti.
+
+### 3. Vältettävät sudenkuopat
+
+**Älä yritä piilottaa C++:aa kokonaan**
+Flutterin kaltaisten projektien käytäntö osoittaa, että yritys kääriä C++-rajapinta puhtaaksi ObjC:ksi johtaa loputtomaan käärekerrokseen, koska moottorin odottamat tyypit (kuten Skia-tyypit, vector, map) on pakko kääriä kerros kerrokselta, ja suorituskyky kärsii. Oikea tavoite on: **C++-ydin pysyy liiketoimintalogiikan kantajana, Objective-C++ tarjoaa vakaan rajan**.
+
+**Muistinhallinnan sekasotku**
+C++:n `new/delete` ja ObjC:n ARC ovat rinnakkaisia. Kääreluokan `dealloc`-metodissa on varmistettava C++-objektin eksplisiittinen tuhoaminen. Jos C++-objekti on upotettu ObjC-luokan instanssimuuttujaksi, varmista, ettei sillä ole virtuaalifunktioita (vanhemmissa iOS-versioissa oli rajoituksia, vaikka uudemmat ovat lieventäneet niitä, on turvallisempaa käyttää osoittimia tallennukseen).
+
+**Säikeiden välinen takaisinkutsu**
+Pelimoottorin silmukka on yleensä itsenäisessä säikeessä, mutta AdMob-mainosten ja muiden UI-kutsujen on palattava pääsäikeeseen. C++-ytimessä "pyydä mainosta" -viesti on siepattava ObjC-käärekerroksessa ja käytettävä `dispatch_async(dispatch_get_main_queue(), ^{ ... })` suorittaakseen sen pääsäikeessä, muuten peli jumiutuu tai kaatuu.
+
+**Älä käytä `performSelector`-kutsua siltaamiseen**
+C++-takaisinkutsuissa `performSelector`-kutsuminen on epävakaa ja saattaa aiheuttaa App Storen hylkäyksen. Oikea tapa on tallentaa `id`-kohde ja `SEL`-valitsin kääreluokan C++-luokan jäsenmuuttujiksi ja kutsua niitä suoraan `.mm`-tiedoston lambdassa.
+
+### 4. Yhteenveto
+
+"Täydellisen" Objective-C++-sillan päämäärä **ei ole poistaa C++:aa**, vaan tarjota **vakaa, suorituskykyinen ja ARC-yhteensopiva** raja. Käytä `.mm`-tiedostoja käärekerroksena, anna C++:n kantaa pelilogiikka, käytä metal-cpp:tä renderöintipuolen kevyisiin kutsuihin ja käytä Djinniä tyyppimuunnosten automatisointiin. Tämä on kypsin insinööriratkaisu tällä hetkellä.

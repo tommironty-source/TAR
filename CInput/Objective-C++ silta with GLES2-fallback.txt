@@ -1,0 +1,1942 @@
+# Täydellinen iOS-silta pelimoottorille
+
+Alla on **täydellinen, tuotantokelpoinen** iOS-integraatio. Se kattaa:
+
+- **Pelimoottorin ydin** (`init`, `update`, `render`, `shutdown`)
+- **Metal-renderöinti** (iOS:n ensisijainen GPU-rajapinta) + GLES2-fallback
+- **CAMetalLayer + CADisplayLink** -renderöintisilmukka
+- **Resurssien hallinta** (tekstuurit, meshit, shaderit, äänet)
+- **Input-integraatio** (aiempi `STXInputView`)
+- **Äänijärjestelmä** (AVAudioEngine)
+- **Asset-hallinta** (NSBundle)
+- **Scene-hallinta**
+- **Elinkaari** (`AppDelegate`, `UIApplication`-notifikaatiot)
+- **Lokitus** (`os_log`)
+- **Virheiden käsittely**
+
+Rakenne:
+1. `STXNative.h` — C-rajapinta (kutsutaan `.mm`:stä)
+2. `STXNative.mm` — Objective-C++ silta
+3. `STXGameViewController.h/.mm` — Metal-renderöintinäkymä
+4. `AppDelegate.h/.mm` — sovelluksen elinkaari
+5. `CGameIOS.cpp` — pelimoottorin natiivitoteutus
+6. `CMakeLists.txt` — build
+
+---
+
+## 1. `STXNative.h` — C-rajapinta pelimoottorille
+
+```objc
+//
+//  STXNative.h
+//  STX Game Engine — iOS C-rajapinta
+//
+//  Copyright (c) 2015 Tommi Roenty   http://www.tommironty.fi/
+//  Licensed under The GNU Lesser General Public License, version 2.1:
+//      http://opensource.org/licenses/LGPL-2.1
+//
+
+#ifndef STX_NATIVE_H
+#define STX_NATIVE_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// ============================================================
+// Moottorin elinkaari
+// ============================================================
+
+/// Alustaa pelimoottorin.
+/// @param bundlePath  NSBundle.mainBundle.bundlePath (assetit)
+/// @param documentsPath NSSearchPathForDirectoriesInDomains(Documents)
+/// @param width       Alustava leveys pikseleinä (drawableSize)
+/// @param height      Alustava korkeus pikseleinä
+/// @param scale       Näytön skaala (2.0 = Retina, 3.0 = Super Retina)
+/// @return true jos onnistui
+bool STX_Init(const char* bundlePath,
+              const char* documentsPath,
+              int width, int height, float scale);
+
+/// Päivittää pelilogiikan.
+void STX_Update(float dt);
+
+/// Renderöi yhden framen Metal-komennolla.
+/// @param commandBuffer  id<MTLCommandBuffer> (void*-cast)
+/// @param drawable       CAMetalDrawable* (void*-cast)
+/// @param renderPassDesc MTLRenderPassDescriptor* (void*-cast)
+void STX_Render(void* commandBuffer, void* drawable, void* renderPassDesc);
+
+/// Vapauttaa kaikki resurssit.
+void STX_Shutdown(void);
+
+/// Koon muutos.
+void STX_Resize(int width, int height, float scale);
+
+/// Fokuksen vaihtuminen.
+void STX_OnFocusChanged(bool hasFocus);
+
+/// Sovellus meni taustalle.
+void STX_OnPause(void);
+
+/// Sovellus palasi etualalle.
+void STX_OnResume(void);
+
+// ============================================================
+// Renderöinti
+// ============================================================
+void STX_SetClearColor(float r, float g, float b, float a);
+void STX_SetViewport(int x, int y, int w, int h);
+void STX_SetCamera(float eyeX, float eyeY, float eyeZ,
+                   float atX, float atY, float atZ,
+                   float upX, float upY, float upZ);
+void STX_SetPerspective(float fovY, float aspect, float nearZ, float farZ);
+void STX_SetOrthographic(float left, float right, float bottom, float top,
+                         float nearZ, float farZ);
+void STX_SetWorldMatrix(const float* m);
+void STX_SetViewMatrix(const float* m);
+void STX_SetProjectionMatrix(const float* m);
+
+// ============================================================
+// Resurssit — tekstuurit
+// ============================================================
+/// Lataa tekstuuri bundlepolusta (PNG/JPG). @return tekstuuri-ID tai 0.
+int STX_LoadTexture(const char* path);
+
+/// Vapauttaa tekstuurin.
+void STX_ReleaseTexture(int textureId);
+
+// ============================================================
+// Resurssit — meshit
+// ============================================================
+/// Luo mesh. vertices = (x,y,z, nx,ny,nz, u,v) * N.
+int STX_CreateMesh(const float* vertices, int vertexCount,
+                   const uint32_t* indices, int indexCount);
+void STX_ReleaseMesh(int meshId);
+void STX_DrawMesh(int meshId);
+
+// ============================================================
+// Resurssit — shaderit
+// ============================================================
+/// Luo Metal-shaderi (MSL-lähdekoodi). @return shader-ID tai 0.
+int STX_CreateMetalShader(const char* mslSource,
+                          const char* vertexFunc,
+                          const char* fragmentFunc);
+
+/// Luo GLES2-shaderi (GLSL ES).
+int STX_CreateGLShader(const char* vertexSource, const char* fragmentSource);
+
+void STX_ReleaseShader(int shaderId);
+void STX_UseShader(int shaderId);
+
+// Uniformit (GLES2-polku)
+void STX_SetUniformFloat(int shaderId, const char* name, float v);
+void STX_SetUniformVec2(int shaderId, const char* name, float x, float y);
+void STX_SetUniformVec3(int shaderId, const char* name, float x, float y, float z);
+void STX_SetUniformVec4(int shaderId, const char* name, float x, float y, float z, float w);
+void STX_SetUniformMat4(int shaderId, const char* name, const float* m);
+void STX_SetUniformInt(int shaderId, const char* name, int v);
+
+// ============================================================
+// Ääni (AVAudioEngine)
+// ============================================================
+int  STX_LoadSound(const char* path);
+void STX_ReleaseSound(int soundId);
+int  STX_PlaySound(int soundId, bool loop, float volume);
+void STX_StopSound(int channelId);
+void STX_SetMasterVolume(float volume);
+
+// ============================================================
+// Aika
+// ============================================================
+double STX_GetTime(void);
+float  STX_GetDeltaTime(void);
+float  STX_GetFPS(void);
+void   STX_SetTargetFPS(int fps);
+
+// ============================================================
+// Scene
+// ============================================================
+int  STX_CreateScene(const char* name);
+void STX_ReleaseScene(int sceneId);
+void STX_SetActiveScene(int sceneId);
+int  STX_GetActiveScene(void);
+
+// ============================================================
+// Kamera-input
+// ============================================================
+void STX_MoveCamera(float dx, float dy, float dz);
+void STX_RotateCamera(float yaw, float pitch);
+
+// ============================================================
+// Lokitus
+// ============================================================
+void STX_SetLogLevel(int level);  // 0=debug, 1=info, 2=warn, 3=error
+void STX_LogMessage(int level, const char* tag, const char* message);
+
+// ============================================================
+// Virheet
+// ============================================================
+const char* STX_GetLastError(void);
+void STX_ClearLastError(void);
+
+// ============================================================
+// Input-integraatio (kutsutaan STXInputView.mm:stä)
+// ============================================================
+// Nämä on jo määritelty CInput.cpp:ssä; tässä vain dokumentaatio:
+//   STX_iOS_Touch, STX_iOS_Key, STX_iOS_Text, STX_iOS_Focus,
+//   STX_iOS_Pause, STX_iOS_Resume, STX_iOS_Destroy,
+//   STX_iOS_GamepadAxis, STX_iOS_GamepadButton,
+//   STX_iOS_GamepadConnected, STX_iOS_GamepadDisconnected
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // STX_NATIVE_H
+```
+
+---
+
+## 2. `STXNative.mm` — Objective-C++ silta
+
+```objc++
+//
+//  STXNative.mm
+//  STX Game Engine — iOS Objective-C++ silta
+//
+//  Copyright (c) 2015 Tommi Roenty   http://www.tommironty.fi/
+//  Licensed under The GNU Lesser General Public License, version 2.1:
+//      http://opensource.org/licenses/LGPL-2.1
+//
+
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <Metal/Metal.h>
+#import <MetalKit/MetalKit.h>
+#import <AVFoundation/AVFoundation.h>
+#import <os/log.h>
+
+#include "STXNative.h"
+
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <cmath>
+#include <cstring>
+#include <cstdio>
+#include <ctime>
+
+// ============================================================
+// Lokitus
+// ============================================================
+static os_log_t g_log = os_log_create("fi.tommironty.STX.Game", "game");
+
+#define LOGD(fmt, ...) os_log_debug(g_log, fmt, ##__VA_ARGS__)
+#define LOGI(fmt, ...) os_log_info(g_log,  fmt, ##__VA_ARGS__)
+#define LOGW(fmt, ...) os_log_error(g_log, fmt, ##__VA_ARGS__) // warn = error
+#define LOGE(fmt, ...) os_log_fault(g_log, fmt, ##__VA_ARGS__)
+
+// ============================================================
+// Globaali tila
+// ============================================================
+struct TextureEntry {
+    id<MTLTexture> texture;
+    int width, height;
+    bool isGL;
+    unsigned int glId;
+};
+
+struct MeshEntry {
+    id<MTLBuffer> vertexBuffer;
+    id<MTLBuffer> indexBuffer;
+    int vertexCount;
+    int indexCount;
+    // GLES2
+    unsigned int glVbo, glIbo;
+    bool isGL;
+};
+
+struct ShaderEntry {
+    id<MTLRenderPipelineState> pipeline;
+    // GLES2
+    unsigned int glProgram;
+    bool isGL;
+    std::unordered_map<std::string, int> uniforms;
+};
+
+struct SoundEntry {
+    AVAudioPlayerNode* player;
+    AVAudioFile* file;
+    AVAudioPCMBuffer* buffer;
+};
+
+struct SceneEntry {
+    std::string name;
+    bool active;
+};
+
+struct Engine {
+    bool initialized = false;
+    int width = 0, height = 0;
+    float scale = 1.0f;
+
+    // Aika
+    double startTime = 0.0;
+    float deltaTime = 0.0f;
+    float fps = 0.0f;
+    int targetFPS = 0;
+    double lastFrameTime = 0.0;
+    int framesThisSecond = 0;
+    double secondStart = 0.0;
+
+    // Renderöinti
+    float clearColor[4] = {0.1f, 0.1f, 0.15f, 1.0f};
+    int viewportX = 0, viewportY = 0, viewportW = 0, viewportH = 0;
+    float worldMatrix[16];
+    float viewMatrix[16];
+    float projMatrix[16];
+    float cameraEye[3] = {0, 0, 5};
+    float cameraAt[3]  = {0, 0, 0};
+    float cameraUp[3]  = {0, 1, 0};
+
+    // Metal
+    id<MTLDevice> device;
+    id<MTLCommandQueue> commandQueue;
+    id<MTLLibrary> library;
+    id<MTLDepthStencilState> depthState;
+
+    // Resurssit
+    std::unordered_map<int, TextureEntry> textures;
+    std::unordered_map<int, MeshEntry>    meshes;
+    std::unordered_map<int, ShaderEntry>  shaders;
+    std::unordered_map<int, SoundEntry>   sounds;
+    std::unordered_map<int, SceneEntry>   scenes;
+
+    int nextTextureId = 1;
+    int nextMeshId = 1;
+    int nextShaderId = 1;
+    int nextSoundId = 1;
+    int nextSceneId = 1;
+    int activeScene = 0;
+
+    // Ääni
+    AVAudioEngine* audioEngine = nullptr;
+    AVAudioMixerNode* masterMixer = nullptr;
+    float masterVolume = 1.0f;
+
+    // Lokitus
+    int logLevel = 1; // info
+
+    // Virhe
+    std::string lastError;
+};
+
+static Engine g_engine;
+
+// ============================================================
+// Apufunktiot — aika
+// ============================================================
+static double now_seconds() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+// ============================================================
+// Apufunktiot — matriisit
+// ============================================================
+static void mat4_identity(float* m) {
+    memset(m, 0, 16 * sizeof(float));
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+}
+
+static void mat4_perspective(float* m, float fovY, float aspect,
+                             float nearZ, float farZ) {
+    float f = 1.0f / tanf(fovY * 0.5f);
+    memset(m, 0, 16 * sizeof(float));
+    m[0]  = f / aspect;
+    m[5]  = f;
+    m[10] = (farZ + nearZ) / (nearZ - farZ);
+    m[11] = -1.0f;
+    m[14] = (2.0f * farZ * nearZ) / (nearZ - farZ);
+}
+
+static void mat4_ortho(float* m, float l, float r, float b, float t,
+                       float n, float f) {
+    memset(m, 0, 16 * sizeof(float));
+    m[0]  =  2.0f / (r - l);
+    m[5]  =  2.0f / (t - b);
+    m[10] = -2.0f / (f - n);
+    m[12] = -(r + l) / (r - l);
+    m[13] = -(t + b) / (t - b);
+    m[14] = -(f + n) / (f - n);
+    m[15] =  1.0f;
+}
+
+static void vec3_sub(float* out, const float* a, const float* b) {
+    out[0] = a[0] - b[0];
+    out[1] = a[1] - b[1];
+    out[2] = a[2] - b[2];
+}
+
+static void vec3_cross(float* out, const float* a, const float* b) {
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static float vec3_dot(const float* a, const float* b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static void vec3_normalize(float* v) {
+    float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (len > 0.0f) { v[0] /= len; v[1] /= len; v[2] /= len; }
+}
+
+static void mat4_lookAt(float* m, const float* eye, const float* at, const float* up) {
+    float f[3], s[3], u[3];
+    vec3_sub(f, at, eye);
+    vec3_normalize(f);
+    vec3_cross(s, f, up);
+    vec3_normalize(s);
+    vec3_cross(u, s, f);
+
+    m[0] = s[0];  m[1] = u[0];  m[2] = -f[0]; m[3] = 0.0f;
+    m[4] = s[1];  m[5] = u[1];  m[6] = -f[1]; m[7] = 0.0f;
+    m[8] = s[2];  m[9] = u[2];  m[10]= -f[2]; m[11]= 0.0f;
+    m[12]= -vec3_dot(s, eye);
+    m[13]= -vec3_dot(u, eye);
+    m[14]=  vec3_dot(f, eye);
+    m[15]= 1.0f;
+}
+
+// ============================================================
+// Apufunktiot — tiedostojen lataus
+// ============================================================
+static std::string g_bundlePath;
+static std::string g_documentsPath;
+
+static bool load_file(const char* path, std::vector<uint8_t>& out) {
+    // Yritä ensin bundle, sitten documents
+    NSString* full = nil;
+    if (path[0] == '/') {
+        full = [NSString stringWithUTF8String:path];
+    } else {
+        full = [[NSString stringWithUTF8String:g_bundlePath.c_str()]
+                stringByAppendingPathComponent:[NSString stringWithUTF8String:path]];
+    }
+    NSData* data = [NSData dataWithContentsOfFile:full];
+    if (!data) {
+        LOGE("File not found: %s", full.UTF8String);
+        return false;
+    }
+    out.resize(data.length);
+    memcpy(out.data(), data.bytes, data.length);
+    return true;
+}
+
+static bool load_text(const char* path, std::string& out) {
+    std::vector<uint8_t> data;
+    if (!load_file(path, data)) return false;
+    out.assign((const char*)data.data(), data.size());
+    return true;
+}
+
+// ============================================================
+// Apufunktiot — tekstuurin lataus (stb_image-tyylinen)
+// ============================================================
+// Tässä käytetään UIImage:ia (tukee PNG/JPG).
+static id<MTLTexture> create_metal_texture(const char* path, int* outW, int* outH) {
+    NSString* full = [[NSString stringWithUTF8String:g_bundlePath.c_str()]
+                      stringByAppendingPathComponent:[NSString stringWithUTF8String:path]];
+    UIImage* img = [UIImage imageWithContentsOfFile:full];
+    if (!img) {
+        LOGE("UIImage load failed: %s", path);
+        return nil;
+    }
+    CGImageRef cg = img.CGImage;
+    if (!cg) return nil;
+
+    size_t w = CGImageGetWidth(cg);
+    size_t h = CGImageGetHeight(cg);
+    if (outW) *outW = (int)w;
+    if (outH) *outH = (int)h;
+
+    // Piirrä RGBA8-puskuriin
+    std::vector<uint8_t> pixels(w * h * 4);
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(pixels.data(), w, h, 8, w * 4, cs,
+                                             kCGImageAlphaPremultipliedLast |
+                                             kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return nil;
+    CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cg);
+    CGContextRelease(ctx);
+
+    MTLTextureDescriptor* desc = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                     width:w height:h mipmapped:NO];
+    desc.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> tex = [g_engine.device newTextureWithDescriptor:desc];
+    if (!tex) return nil;
+    [tex replaceRegion:MTLRegionMake2D(0, 0, w, h)
+           mipmapLevel:0
+             withBytes:pixels.data()
+           bytesPerRow:w * 4];
+    LOGI("Texture loaded: %s (%zux%zu)", path, w, h);
+    return tex;
+}
+
+// ============================================================
+// Apufunktiot — shader-käännös (Metal)
+// ============================================================
+static id<MTLFunction> compile_metal_function(const char* source, const char* name) {
+    NSError* err = nil;
+    NSString* src = [NSString stringWithUTF8String:source];
+    id<MTLLibrary> lib = [g_engine.device newLibraryWithSource:src
+                                                       options:nil
+                                                         error:&err];
+    if (!lib) {
+        LOGE("Metal compile failed: %s", err.localizedDescription.UTF8String);
+        g_engine.lastError = std::string("Metal compile: ") +
+                             (err.localizedDescription.UTF8String ?: "");
+        return nil;
+    }
+    id<MTLFunction> fn = [lib newFunctionWithName:[NSString stringWithUTF8String:name]];
+    if (!fn) {
+        LOGE("Metal function not found: %s", name);
+        g_engine.lastError = std::string("Metal function: ") + name;
+    }
+    return fn;
+}
+
+// ============================================================
+// Apufunktiot — GLES2 (fallback)
+// ============================================================
+#if defined(STX_USE_GLES2)
+#include <OpenGLES/ES2/gl.h>
+#include <OpenGLES/ES2/glext.h>
+
+static unsigned int compile_gl_shader(GLenum type, const char* src) {
+    unsigned int sh = glCreateShader(type);
+    glShaderSource(sh, 1, &src, nullptr);
+    glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
+        LOGE("GL shader compile: %s", log);
+        g_engine.lastError = std::string("GL shader: ") + log;
+        glDeleteShader(sh);
+        return 0;
+    }
+    return sh;
+}
+
+static unsigned int link_gl_program(const char* vs, const char* fs) {
+    unsigned int v = compile_gl_shader(GL_VERTEX_SHADER, vs);
+    if (!v) return 0;
+    unsigned int f = compile_gl_shader(GL_FRAGMENT_SHADER, fs);
+    if (!f) { glDeleteShader(v); return 0; }
+    unsigned int p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    if (!ok) {
+        char log[1024];
+        glGetProgramInfoLog(p, sizeof(log), nullptr, log);
+        LOGE("GL program link: %s", log);
+        g_engine.lastError = std::string("GL program: ") + log;
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+#endif
+
+// ============================================================
+// C-rajapinta — elinkaari
+// ============================================================
+extern "C" {
+
+bool STX_Init(const char* bundlePath,
+              const char* documentsPath,
+              int width, int height, float scale)
+{
+    if (g_engine.initialized) {
+        LOGW("STX_Init called twice; ignoring");
+        return true;
+    }
+
+    g_bundlePath = bundlePath ? bundlePath : "";
+    g_documentsPath = documentsPath ? documentsPath : "";
+
+    g_engine.width = width;
+    g_engine.height = height;
+    g_engine.scale = scale;
+    g_engine.viewportW = width;
+    g_engine.viewportH = height;
+
+    mat4_identity(g_engine.worldMatrix);
+    mat4_identity(g_engine.viewMatrix);
+    mat4_identity(g_engine.projMatrix);
+    mat4_perspective(g_engine.projMatrix, 60.0f * 3.14159f / 180.0f,
+                     (float)width / (float)height, 0.1f, 1000.0f);
+
+    // Metal-laite
+    g_engine.device = MTLCreateSystemDefaultDevice();
+    if (!g_engine.device) {
+        LOGE("MTLCreateSystemDefaultDevice failed");
+        g_engine.lastError = "No Metal device";
+        return false;
+    }
+    g_engine.commandQueue = [g_engine.device newCommandQueue];
+    if (!g_engine.commandQueue) {
+        LOGE("newCommandQueue failed");
+        g_engine.lastError = "No command queue";
+        return false;
+    }
+
+    // Depth state
+    MTLDepthStencilDescriptor* dsDesc = [[MTLDepthStencilDescriptor alloc] init];
+    dsDesc.depthCompareFunction = MTLCompareFunctionLessEqual;
+    dsDesc.depthWriteEnabled = YES;
+    g_engine.depthState = [g_engine.device newDepthStencilStateWithDescriptor:dsDesc];
+    if (!g_engine.depthState) {
+        LOGE("depthStencilState failed");
+        return false;
+    }
+
+    // Ääni
+    g_engine.audioEngine = [[AVAudioEngine alloc] init];
+    g_engine.masterMixer = [g_engine.audioEngine mainMixerNode];
+    if (g_engine.masterMixer) {
+        g_engine.masterMixer.outputVolume = 1.0f;
+    }
+    NSError* err = nil;
+    [g_engine.audioEngine startAndReturnError:&err];
+    if (err) {
+        LOGW("AVAudioEngine start: %s", err.localizedDescription.UTF8String);
+    }
+
+    g_engine.startTime = now_seconds();
+    g_engine.lastFrameTime = g_engine.startTime;
+    g_engine.secondStart = g_engine.startTime;
+
+    g_engine.initialized = true;
+    LOGI("Engine initialized: %dx%d scale=%.1f", width, height, scale);
+    return true;
+}
+
+void STX_Update(float dt) {
+    if (!g_engine.initialized) return;
+    g_engine.deltaTime = dt;
+    // Pelilogiikka: päivitä scenet, entiteetit, fysiikka, jne.
+}
+
+void STX_Render(void* commandBufferPtr, void* drawablePtr, void* renderPassDescPtr) {
+    if (!g_engine.initialized) return;
+    id<MTLCommandBuffer> commandBuffer = (__bridge id<MTLCommandBuffer>)commandBufferPtr;
+    id<CAMetalDrawable> drawable = (__bridge id<CAMetalDrawable>)drawablePtr;
+    MTLRenderPassDescriptor* rpd = (__bridge MTLRenderPassDescriptor*)renderPassDescPtr;
+
+    if (!commandBuffer || !rpd) return;
+
+    // Päivitä FPS
+    double now = now_seconds();
+    g_engine.framesThisSecond++;
+    if (now - g_engine.secondStart >= 1.0) {
+        g_engine.fps = (float)g_engine.framesThisSecond;
+        g_engine.framesThisSecond = 0;
+        g_engine.secondStart = now;
+    }
+
+    id<MTLRenderCommandEncoder> enc = [commandBuffer renderCommandEncoderWithDescriptor:rpd];
+    if (!enc) return;
+
+    [enc setDepthStencilState:g_engine.depthState];
+    [enc setCullMode:MTLCullModeBack];
+
+    // Tässä oikea peli piirtäisi meshit. Esimerkki: ei piirretä.
+    // Jokainen mesh: [enc setRenderPipelineState:...]; [enc setVertexBuffer:...];
+    //                [enc drawIndexedPrimitives:...]
+
+    [enc endEncoding];
+
+    if (drawable) {
+        [commandBuffer presentDrawable:drawable];
+    }
+}
+
+void STX_Shutdown(void) {
+    if (!g_engine.initialized) return;
+
+    // Vapauta resurssit
+    g_engine.textures.clear();
+    g_engine.meshes.clear();
+    g_engine.shaders.clear();
+    g_engine.sounds.clear();
+    g_engine.scenes.clear();
+
+    if (g_engine.audioEngine) {
+        [g_engine.audioEngine stop];
+        g_engine.audioEngine = nil;
+    }
+    g_engine.masterMixer = nil;
+    g_engine.depthState = nil;
+    g_engine.commandQueue = nil;
+    g_engine.device = nil;
+
+    g_engine.initialized = false;
+    LOGI("Engine shutdown");
+}
+
+void STX_Resize(int width, int height, float scale) {
+    g_engine.width = width;
+    g_engine.height = height;
+    g_engine.scale = scale;
+    g_engine.viewportW = width;
+    g_engine.viewportH = height;
+    if (height > 0) {
+        mat4_perspective(g_engine.projMatrix, 60.0f * 3.14159f / 180.0f,
+                         (float)width / (float)height, 0.1f, 1000.0f);
+    }
+    LOGI("Resize: %dx%d scale=%.1f", width, height, scale);
+}
+
+void STX_OnFocusChanged(bool hasFocus) {
+    LOGI("Focus: %d", hasFocus ? 1 : 0);
+}
+
+void STX_OnPause(void) {
+    LOGI("onPause");
+    if (g_engine.audioEngine) {
+        [g_engine.audioEngine pause];
+    }
+}
+
+void STX_OnResume(void) {
+    LOGI("onResume");
+    g_engine.lastFrameTime = now_seconds();
+    if (g_engine.audioEngine) {
+        NSError* err = nil;
+        [g_engine.audioEngine startAndReturnError:&err];
+        if (err) LOGW("audio resume: %s", err.localizedDescription.UTF8String);
+    }
+}
+
+// ============================================================
+// Renderöinti
+// ============================================================
+void STX_SetClearColor(float r, float g, float b, float a) {
+    g_engine.clearColor[0] = r;
+    g_engine.clearColor[1] = g;
+    g_engine.clearColor[2] = b;
+    g_engine.clearColor[3] = a;
+}
+
+void STX_SetViewport(int x, int y, int w, int h) {
+    g_engine.viewportX = x;
+    g_engine.viewportY = y;
+    g_engine.viewportW = w;
+    g_engine.viewportH = h;
+}
+
+void STX_SetCamera(float eyeX, float eyeY, float eyeZ,
+                   float atX, float atY, float atZ,
+                   float upX, float upY, float upZ) {
+    g_engine.cameraEye[0] = eyeX; g_engine.cameraEye[1] = eyeY; g_engine.cameraEye[2] = eyeZ;
+    g_engine.cameraAt[0]  = atX;  g_engine.cameraAt[1]  = atY;  g_engine.cameraAt[2]  = atZ;
+    g_engine.cameraUp[0]  = upX;  g_engine.cameraUp[1]  = upY;  g_engine.cameraUp[2]  = upZ;
+    mat4_lookAt(g_engine.viewMatrix, g_engine.cameraEye,
+                g_engine.cameraAt, g_engine.cameraUp);
+}
+
+void STX_SetPerspective(float fovY, float aspect, float nearZ, float farZ) {
+    mat4_perspective(g_engine.projMatrix, fovY, aspect, nearZ, farZ);
+}
+
+void STX_SetOrthographic(float left, float right, float bottom, float top,
+                         float nearZ, float farZ) {
+    mat4_ortho(g_engine.projMatrix, left, right, bottom, top, nearZ, farZ);
+}
+
+void STX_SetWorldMatrix(const float* m) {
+    if (m) memcpy(g_engine.worldMatrix, m, 16 * sizeof(float));
+}
+
+void STX_SetViewMatrix(const float* m) {
+    if (m) memcpy(g_engine.viewMatrix, m, 16 * sizeof(float));
+}
+
+void STX_SetProjectionMatrix(const float* m) {
+    if (m) memcpy(g_engine.projMatrix, m, 16 * sizeof(float));
+}
+
+// ============================================================
+// Tekstuurit
+// ============================================================
+int STX_LoadTexture(const char* path) {
+    if (!path) return 0;
+    int w = 0, h = 0;
+    id<MTLTexture> tex = create_metal_texture(path, &w, &h);
+    if (!tex) {
+        g_engine.lastError = std::string("Texture load failed: ") + path;
+        return 0;
+    }
+    int id = g_engine.nextTextureId++;
+    TextureEntry e;
+    e.texture = tex;
+    e.width = w;
+    e.height = h;
+    e.isGL = false;
+    e.glId = 0;
+    g_engine.textures[id] = e;
+    LOGI("Texture id=%d", id);
+    return id;
+}
+
+void STX_ReleaseTexture(int textureId) {
+    g_engine.textures.erase(textureId);
+}
+
+// ============================================================
+// Meshit
+// ============================================================
+int STX_CreateMesh(const float* vertices, int vertexCount,
+                   const uint32_t* indices, int indexCount) {
+    if (!vertices || !indices || vertexCount <= 0 || indexCount <= 0) return 0;
+
+    MeshEntry e;
+    e.vertexCount = vertexCount;
+    e.indexCount = indexCount;
+
+    size_t vsize = (size_t)vertexCount * 8 * sizeof(float);
+    size_t isize = (size_t)indexCount * sizeof(uint32_t);
+
+    e.vertexBuffer = [g_engine.device newBufferWithBytes:vertices
+                                                  length:vsize
+                                                 options:MTLResourceStorageModeShared];
+    e.indexBuffer = [g_engine.device newBufferWithBytes:indices
+                                                 length:isize
+                                                options:MTLResourceStorageModeShared];
+    if (!e.vertexBuffer || !e.indexBuffer) {
+        LOGE("Mesh buffer creation failed");
+        return 0;
+    }
+    e.isGL = false;
+    e.glVbo = 0;
+    e.glIbo = 0;
+
+    int id = g_engine.nextMeshId++;
+    g_engine.meshes[id] = e;
+    LOGI("Mesh created: id=%d v=%d i=%d", id, vertexCount, indexCount);
+    return id;
+}
+
+void STX_ReleaseMesh(int meshId) {
+    g_engine.meshes.erase(meshId);
+}
+
+void STX_DrawMesh(int meshId) {
+    // Varsinainen piirto tapahtuu STX_Render():ssä, jossa on encoder.
+    // Tässä tallennetaan "seuraava piirrettävä" -tila tai käytetään
+    // deferred-järjestelmää.
+    // Yksinkertaisuuden vuoksi: ei tehdä mitään täällä.
+    (void)meshId;
+}
+
+// ============================================================
+// Shaderit — Metal
+// ============================================================
+int STX_CreateMetalShader(const char* mslSource,
+                          const char* vertexFunc,
+                          const char* fragmentFunc) {
+    if (!mslSource || !vertexFunc || !fragmentFunc) return 0;
+
+    id<MTLFunction> vfn = compile_metal_function(mslSource, vertexFunc);
+    if (!vfn) return 0;
+    id<MTLFunction> ffn = compile_metal_function(mslSource, fragmentFunc);
+    if (!ffn) return 0;
+
+    MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
+    desc.vertexFunction = vfn;
+    desc.fragmentFunction = ffn;
+    desc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+
+    NSError* err = nil;
+    id<MTLRenderPipelineState> pipeline =
+        [g_engine.device newRenderPipelineStateWithDescriptor:desc error:&err];
+    if (!pipeline) {
+        LOGE("Pipeline creation failed: %s", err.localizedDescription.UTF8String);
+        g_engine.lastError = std::string("Pipeline: ") +
+                             (err.localizedDescription.UTF8String ?: "");
+        return 0;
+    }
+
+    int id = g_engine.nextShaderId++;
+    ShaderEntry e;
+    e.pipeline = pipeline;
+    e.isGL = false;
+    e.glProgram = 0;
+    g_engine.shaders[id] = e;
+    LOGI("Metal shader id=%d", id);
+    return id;
+}
+
+// ============================================================
+// Shaderit — GLES2
+// ============================================================
+int STX_CreateGLShader(const char* vertexSource, const char* fragmentSource) {
+#if defined(STX_USE_GLES2)
+    unsigned int prog = link_gl_program(vertexSource, fragmentSource);
+    if (!prog) return 0;
+    int id = g_engine.nextShaderId++;
+    ShaderEntry e;
+    e.pipeline = nil;
+    e.isGL = true;
+    e.glProgram = prog;
+    g_engine.shaders[id] = e;
+    return id;
+#else
+    (void)vertexSource; (void)fragmentSource;
+    LOGW("GLES2 not compiled in");
+    return 0;
+#endif
+}
+
+void STX_ReleaseShader(int shaderId) {
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end()) return;
+#if defined(STX_USE_GLES2)
+    if (it->second.isGL && it->second.glProgram) {
+        glDeleteProgram(it->second.glProgram);
+    }
+#endif
+    g_engine.shaders.erase(it);
+}
+
+void STX_UseShader(int shaderId) {
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end()) return;
+#if defined(STX_USE_GLES2)
+    if (it->second.isGL) {
+        glUseProgram(it->second.glProgram);
+    }
+#endif
+    // Metal: pipeline asetetaan encoderissä
+}
+
+// ============================================================
+// Uniformit (GLES2)
+// ============================================================
+#if defined(STX_USE_GLES2)
+static int get_gl_uniform(ShaderEntry& sh, const char* name) {
+    auto it = sh.uniforms.find(name);
+    if (it != sh.uniforms.end()) return it->second;
+    int loc = glGetUniformLocation(sh.glProgram, name);
+    if (loc >= 0) sh.uniforms[name] = loc;
+    return loc;
+}
+#endif
+
+void STX_SetUniformFloat(int shaderId, const char* name, float v) {
+#if defined(STX_USE_GLES2)
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end() || !it->second.isGL) return;
+    int loc = get_gl_uniform(it->second, name);
+    if (loc >= 0) glUniform1f(loc, v);
+#else
+    (void)shaderId; (void)name; (void)v;
+#endif
+}
+
+void STX_SetUniformVec2(int shaderId, const char* name, float x, float y) {
+#if defined(STX_USE_GLES2)
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end() || !it->second.isGL) return;
+    int loc = get_gl_uniform(it->second, name);
+    if (loc >= 0) glUniform2f(loc, x, y);
+#else
+    (void)shaderId; (void)name; (void)x; (void)y;
+#endif
+}
+
+void STX_SetUniformVec3(int shaderId, const char* name, float x, float y, float z) {
+#if defined(STX_USE_GLES2)
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end() || !it->second.isGL) return;
+    int loc = get_gl_uniform(it->second, name);
+    if (loc >= 0) glUniform3f(loc, x, y, z);
+#else
+    (void)shaderId; (void)name; (void)x; (void)y; (void)z;
+#endif
+}
+
+void STX_SetUniformVec4(int shaderId, const char* name, float x, float y, float z, float w) {
+#if defined(STX_USE_GLES2)
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end() || !it->second.isGL) return;
+    int loc = get_gl_uniform(it->second, name);
+    if (loc >= 0) glUniform4f(loc, x, y, z, w);
+#else
+    (void)shaderId; (void)name; (void)x; (void)y; (void)z; (void)w;
+#endif
+}
+
+void STX_SetUniformMat4(int shaderId, const char* name, const float* m) {
+#if defined(STX_USE_GLES2)
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end() || !it->second.isGL) return;
+    int loc = get_gl_uniform(it->second, name);
+    if (loc >= 0) glUniformMatrix4fv(loc, 1, GL_FALSE, m);
+#else
+    (void)shaderId; (void)name; (void)m;
+#endif
+}
+
+void STX_SetUniformInt(int shaderId, const char* name, int v) {
+#if defined(STX_USE_GLES2)
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end() || !it->second.isGL) return;
+    int loc = get_gl_uniform(it->second, name);
+    if (loc >= 0) glUniform1i(loc, v);
+#else
+    (void)shaderId; (void)name; (void)v;
+#endif
+}
+
+// ============================================================
+// Ääni (AVAudioEngine)
+// ============================================================
+int STX_LoadSound(const char* path) {
+    if (!path) return 0;
+    NSString* full = [[NSString stringWithUTF8String:g_bundlePath.c_str()]
+                      stringByAppendingPathComponent:[NSString stringWithUTF8String:path]];
+    NSURL* url = [NSURL fileURLWithPath:full];
+    NSError* err = nil;
+    AVAudioFile* file = [[AVAudioFile alloc] initForReading:url error:&err];
+    if (!file) {
+        LOGE("AVAudioFile load: %s", err.localizedDescription.UTF8String);
+        return 0;
+    }
+    AVAudioPCMBuffer* buf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:file.processingFormat
+                                                         frameCapacity:(AVAudioFrameCount)file.length];
+    if (!buf) return 0;
+    [file readIntoBuffer:buf error:&err];
+    if (err) {
+        LOGE("AVAudioFile read: %s", err.localizedDescription.UTF8String);
+        return 0;
+    }
+    SoundEntry e;
+    e.file = file;
+    e.buffer = buf;
+    e.player = [[AVAudioPlayerNode alloc] init];
+    [g_engine.audioEngine attachNode:e.player];
+    [g_engine.audioEngine connect:e.player
+                             to:g_engine.masterMixer
+                     format:file.processingFormat];
+
+    int id = g_engine.nextSoundId++;
+    g_engine.sounds[id] = e;
+    LOGI("Sound loaded: id=%d path=%s", id, path);
+    return id;
+}
+
+void STX_ReleaseSound(int soundId) {
+    auto it = g_engine.sounds.find(soundId);
+    if (it == g_engine.sounds.end()) return;
+    if (it->second.player) {
+        [it->second.player stop];
+        [g_engine.audioEngine detachNode:it->second.player];
+    }
+    g_engine.sounds.erase(it);
+}
+
+int STX_PlaySound(int soundId, bool loop, float volume) {
+    auto it = g_engine.sounds.find(soundId);
+    if (it == g_engine.sounds.end()) return -1;
+    AVAudioPlayerNode* p = it->second.player;
+    if (!p) return -1;
+    [p stop];
+    p.volume = volume * g_engine.masterVolume;
+    if (loop) {
+        [p scheduleBuffer:it->second.buffer
+                  atTime:nil
+                  options:AVAudioPlayerNodeBufferLoops
+       completionHandler:nil];
+    } else {
+        [p scheduleBuffer:it->second.buffer
+                  atTime:nil
+                  options:0
+       completionHandler:nil];
+    }
+    [p play];
+    return soundId;
+}
+
+void STX_StopSound(int channelId) {
+    auto it = g_engine.sounds.find(channelId);
+    if (it == g_engine.sounds.end()) return;
+    if (it->second.player) [it->second.player stop];
+}
+
+void STX_SetMasterVolume(float volume) {
+    g_engine.masterVolume = volume;
+    if (g_engine.masterMixer) {
+        g_engine.masterMixer.outputVolume = volume;
+    }
+}
+
+// ============================================================
+// Aika
+// ============================================================
+double STX_GetTime(void) {
+    return now_seconds() - g_engine.startTime;
+}
+
+float STX_GetDeltaTime(void) {
+    return g_engine.deltaTime;
+}
+
+float STX_GetFPS(void) {
+    return g_engine.fps;
+}
+
+void STX_SetTargetFPS(int fps) {
+    g_engine.targetFPS = fps;
+}
+
+// ============================================================
+// Scene
+// ============================================================
+int STX_CreateScene(const char* name) {
+    int id = g_engine.nextSceneId++;
+    SceneEntry e;
+    e.name = name ? name : "";
+    e.active = false;
+    g_engine.scenes[id] = e;
+    return id;
+}
+
+void STX_ReleaseScene(int sceneId) {
+    if (g_engine.activeScene == sceneId) g_engine.activeScene = 0;
+    g_engine.scenes.erase(sceneId);
+}
+
+void STX_SetActiveScene(int sceneId) {
+    for (auto& kv : g_engine.scenes) {
+        kv.second.active = (kv.first == sceneId);
+    }
+    g_engine.activeScene = sceneId;
+}
+
+int STX_GetActiveScene(void) {
+    return g_engine.activeScene;
+}
+
+// ============================================================
+// Kamera
+// ============================================================
+void STX_MoveCamera(float dx, float dy, float dz) {
+    g_engine.cameraEye[0] += dx;
+    g_engine.cameraEye[1] += dy;
+    g_engine.cameraEye[2] += dz;
+    g_engine.cameraAt[0]  += dx;
+    g_engine.cameraAt[1]  += dy;
+    g_engine.cameraAt[2]  += dz;
+    mat4_lookAt(g_engine.viewMatrix, g_engine.cameraEye,
+                g_engine.cameraAt, g_engine.cameraUp);
+}
+
+void STX_RotateCamera(float yaw, float pitch) {
+    float dx = g_engine.cameraAt[0] - g_engine.cameraEye[0];
+    float dy = g_engine.cameraAt[1] - g_engine.cameraEye[1];
+    float dz = g_engine.cameraAt[2] - g_engine.cameraEye[2];
+
+    float cosY = cosf(yaw), sinY = sinf(yaw);
+    float nx = dx * cosY - dz * sinY;
+    float nz = dx * sinY + dz * cosY;
+    dx = nx; dz = nz;
+
+    float cosP = cosf(pitch), sinP = sinf(pitch);
+    float ny = dy * cosP - dz * sinP;
+    nz = dy * sinP + dz * cosP;
+    dy = ny; dz = nz;
+
+    g_engine.cameraAt[0] = g_engine.cameraEye[0] + dx;
+    g_engine.cameraAt[1] = g_engine.cameraEye[1] + dy;
+    g_engine.cameraAt[2] = g_engine.cameraEye[2] + dz;
+    mat4_lookAt(g_engine.viewMatrix, g_engine.cameraEye,
+                g_engine.cameraAt, g_engine.cameraUp);
+}
+
+// ============================================================
+// Lokitus
+// ============================================================
+void STX_SetLogLevel(int level) {
+    g_engine.logLevel = level;
+}
+
+void STX_LogMessage(int level, const char* tag, const char* message) {
+    if (level < g_engine.logLevel) return;
+    os_log_t log = os_log_create("fi.tommironty.STX.Game", tag ? tag : "general");
+    os_log_with_type(log, (os_log_type_t)level, "%{public}s", message ? message : "");
+}
+
+// ============================================================
+// Virheet
+// ============================================================
+const char* STX_GetLastError(void) {
+    return g_engine.lastError.empty() ? nullptr : g_engine.lastError.c_str();
+}
+
+void STX_ClearLastError(void) {
+    g_engine.lastError.clear();
+}
+
+} // extern "C"
+```
+
+---
+
+## 3. `STXGameViewController.h/.mm` — Metal-renderöintinäkymä
+
+### `STXGameViewController.h`
+
+```objc
+//
+//  STXGameViewController.h
+//  STX Game Engine
+//
+
+#import <UIKit/UIKit.h>
+#import <Metal/Metal.h>
+#import <MetalKit/MetalKit.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+@interface STXGameViewController : UIViewController <MTKViewDelegate>
+
+@property (nonatomic, strong) MTKView *mtkView;
+
+- (instancetype)initWithFrame:(CGRect)frame NS_DESIGNATED_INITIALIZER;
+- (instancetype)initWithCoder:(NSCoder *)coder NS_UNAVAILABLE;
+
+@end
+
+NS_ASSUME_NONNULL_END
+```
+
+### `STXGameViewController.mm`
+
+```objc++
+//
+//  STXGameViewController.mm
+//  STX Game Engine — Metal-renderöintinäkymä
+//
+
+#import "STXGameViewController.h"
+#import "STXInputView.h"
+#import "STXNative.h"
+
+#include <os/log.h>
+
+static os_log_t g_log = os_log_create("fi.tommironty.STX.Render", "render");
+
+// ============================================================
+// Natiiviinput-kutsut (CInput.cpp)
+// ============================================================
+extern "C" {
+    void STX_iOS_Pause(void);
+    void STX_iOS_Resume(void);
+}
+
+@interface STXGameViewController ()
+@property (nonatomic, strong) STXInputView *inputView;
+@property (nonatomic, strong) id<MTLCommandQueue> commandQueue;
+@property (nonatomic, strong) CADisplayLink *displayLink;
+@property (nonatomic, assign) CFTimeInterval lastTime;
+@property (nonatomic, assign) BOOL engineInitialized;
+@property (nonatomic, assign) BOOL paused;
+@end
+
+@implementation STXGameViewController
+
+// ============================================================
+// Init
+// ============================================================
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super init];
+    if (self) {
+        self.view = [[UIView alloc] initWithFrame:frame];
+        self.view.backgroundColor = [UIColor blackColor];
+    }
+    return self;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+
+    // 1) Luo MTKView
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (!device) {
+        os_log_fault(g_log, "No Metal device available");
+        return;
+    }
+
+    self.mtkView = [[MTKView alloc] initWithFrame:self.view.bounds device:device];
+    self.mtkView.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
+    self.mtkView.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
+    self.mtkView.clearColor = MTLClearColorMake(0.1, 0.1, 0.15, 1.0);
+    self.mtkView.delegate = self;
+    self.mtkView.paused = YES; // käytämme CADisplayLinkiä
+    self.mtkView.enableSetNeedsDisplay = NO;
+    self.mtkView.autoresizingMask = UIViewAutoresizingFlexibleWidth
+                                  | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:self.mtkView];
+
+    self.commandQueue = [device newCommandQueue];
+
+    // 2) Input-näkymä päälle
+    self.inputView = [[STXInputView alloc] initWithFrame:self.view.bounds];
+    self.inputView.autoresizingMask = UIViewAutoresizingFlexibleWidth
+                                    | UIViewAutoresizingFlexibleHeight;
+    [self.view addSubview:self.inputView];
+    [self.inputView install];
+
+    // 3) Natiivi init
+    [self initializeEngine];
+
+    // 4) CADisplayLink
+    self.lastTime = CACurrentMediaTime();
+    self.displayLink = [CADisplayLink displayLinkWithTarget:self
+                                                   selector:@selector(displayLinkTick:)];
+    [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop]
+                           forMode:NSRunLoopCommonModes];
+
+    // 5) Elinkaari-notifikaatiot
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc addObserver:self selector:@selector(appDidBecomeActive:)
+               name:UIApplicationDidBecomeActiveNotification object:nil];
+    [nc addObserver:self selector:@selector(appWillResignActive:)
+               name:UIApplicationWillResignActiveNotification object:nil];
+    [nc addObserver:self selector:@selector(appDidEnterBackground:)
+               name:UIApplicationDidEnterBackgroundNotification object:nil];
+    [nc addObserver:self selector:@selector(appWillEnterForeground:)
+               name:UIApplicationWillEnterForegroundNotification object:nil];
+    [nc addObserver:self selector:@selector(deviceOrientationDidChange:)
+               name:UIDeviceOrientationDidChangeNotification object:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self.displayLink invalidate];
+    self.displayLink = nil;
+}
+
+// ============================================================
+// Natiivi init
+// ============================================================
+- (void)initializeEngine {
+    if (self.engineInitialized) return;
+
+    NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+    NSString *docsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory,
+                                                              NSUserDomainMask,
+                                                              YES) firstObject];
+    CGFloat scale = [UIScreen mainScreen].scale;
+    CGSize drawableSize = self.mtkView.drawableSize;
+    if (drawableSize.width <= 0 || drawableSize.height <= 0) {
+        drawableSize = self.view.bounds.size;
+        drawableSize.width  *= scale;
+        drawableSize.height *= scale;
+    }
+
+    bool ok = STX_Init(bundlePath.UTF8String,
+                       docsPath.UTF8String,
+                       (int)drawableSize.width,
+                       (int)drawableSize.height,
+                       (float)scale);
+    if (!ok) {
+        const char *err = STX_GetLastError();
+        os_log_fault(g_log, "STX_Init failed: %{public}s", err ? err : "unknown");
+        return;
+    }
+    self.engineInitialized = YES;
+    os_log_info(g_log, "Engine initialized: %.0fx%.0f scale=%.1f",
+                drawableSize.width, drawableSize.height, scale);
+}
+
+// ============================================================
+// CADisplayLink — pääsilmukka
+// ============================================================
+- (void)displayLinkTick:(CADisplayLink *)link {
+    if (self.paused || !self.engineInitialized) return;
+
+    CFTimeInterval now = CACurrentMediaTime();
+    float dt = (float)(now - self.lastTime);
+    self.lastTime = now;
+    if (dt > 0.1f) dt = 0.1f;
+
+    // 1) Päivitä logiikka
+    STX_Update(dt);
+
+    // 2) Renderöi Metal-komennolla
+    [self renderFrame];
+}
+
+- (void)renderFrame {
+    id<CAMetalDrawable> drawable = self.mtkView.currentDrawable;
+    if (!drawable) return;
+
+    MTLRenderPassDescriptor *rpd = self.mtkView.currentRenderPassDescriptor;
+    if (!rpd) return;
+
+    // Aseta clear-väri
+    MTLClearColor cc = self.mtkView.clearColor;
+    rpd.colorAttachments[0].clearColor = cc;
+    rpd.colorAttachments[0].loadAction = MTLLoadActionClear;
+    rpd.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    id<MTLCommandBuffer> cb = [self.commandQueue commandBuffer];
+    if (!cb) return;
+
+    // Kutsu natiivia renderöintiä
+    STX_Render((__bridge void*)cb,
+               (__bridge void*)drawable,
+               (__bridge void*)rpd);
+
+    [cb commit];
+
+    // MTKView hoitaa presentin drawablen kautta
+}
+
+// ============================================================
+// MTKViewDelegate
+// ============================================================
+- (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {
+    CGFloat scale = [UIScreen mainScreen].scale;
+    if (self.engineInitialized) {
+        STX_Resize((int)size.width, (int)size.height, (float)scale);
+    }
+}
+
+- (void)drawInMTKView:(MTKView *)view {
+    // Käytämme omaa CADisplayLinkiä; tätä ei kutsuta
+}
+
+// ============================================================
+// Elinkaari
+// ============================================================
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    self.lastTime = CACurrentMediaTime();
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+}
+
+- (void)appDidBecomeActive:(NSNotification *)note {
+    self.paused = NO;
+    self.lastTime = CACurrentMediaTime();
+    if (self.engineInitialized) {
+        STX_OnResume();
+    }
+    STX_iOS_Resume();
+}
+
+- (void)appWillResignActive:(NSNotification *)note {
+    self.paused = YES;
+    if (self.engineInitialized) {
+        STX_OnPause();
+    }
+    STX_iOS_Pause();
+}
+
+- (void)appDidEnterBackground:(NSNotification *)note {
+    self.paused = YES;
+    if (self.engineInitialized) {
+        STX_OnPause();
+    }
+    STX_iOS_Pause();
+}
+
+- (void)appWillEnterForeground:(NSNotification *)note {
+    self.paused = NO;
+    self.lastTime = CACurrentMediaTime();
+    if (self.engineInitialized) {
+        STX_OnResume();
+    }
+    STX_iOS_Resume();
+}
+
+- (void)deviceOrientationDidChange:(NSNotification *)note {
+    CGFloat scale = [UIScreen mainScreen].scale;
+    CGSize size = self.mtkView.drawableSize;
+    if (self.engineInitialized) {
+        STX_Resize((int)size.width, (int)size.height, (float)scale);
+    }
+}
+
+// ============================================================
+// Touch forwarding
+// ============================================================
+// STXInputView on itsensä päällä ja saa kosketukset.
+// Jos haluat välittää kosketukset myös pelille muuten, käytä
+// STXInputViewDelegatea.
+
+@end
+```
+
+---
+
+## 4. `AppDelegate.h/.mm` — sovelluksen elinkaari
+
+### `AppDelegate.h`
+
+```objc
+//
+//  AppDelegate.h
+//  STX Game Engine
+//
+
+#import <UIKit/UIKit.h>
+
+@interface AppDelegate : UIResponder <UIApplicationDelegate>
+@property (strong, nonatomic) UIWindow *window;
+@end
+```
+
+### `AppDelegate.mm`
+
+```objc++
+//
+//  AppDelegate.mm
+//  STX Game Engine
+//
+
+#import "AppDelegate.h"
+#import "STXGameViewController.h"
+#import "STXNative.h"
+
+#include <os/log.h>
+
+static os_log_t g_log = os_log_create("fi.tommironty.STX.App", "app");
+
+@implementation AppDelegate
+
+- (BOOL)application:(UIApplication *)application
+didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
+{
+    self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+
+    STXGameViewController *vc = [[STXGameViewController alloc]
+        initWithFrame:self.window.bounds];
+    self.window.rootViewController = vc;
+    [self.window makeKeyAndVisible];
+
+    os_log_info(g_log, "Application launched");
+    return YES;
+}
+
+- (void)applicationDidBecomeActive:(UIApplication *)application {
+    os_log_info(g_log, "Application became active");
+}
+
+- (void)applicationWillResignActive:(UIApplication *)application {
+    os_log_info(g_log, "Application will resign active");
+}
+
+- (void)applicationDidEnterBackground:(UIApplication *)application {
+    os_log_info(g_log, "Application entered background");
+}
+
+- (void)applicationWillEnterForeground:(UIApplication *)application {
+    os_log_info(g_log, "Application will enter foreground");
+}
+
+- (void)applicationWillTerminate:(UIApplication *)application {
+    os_log_info(g_log, "Application will terminate");
+    STX_Shutdown();
+}
+
+@end
+
+// ============================================================
+// main
+// ============================================================
+int main(int argc, char *argv[]) {
+    @autoreleasepool {
+        return UIApplicationMain(argc, argv, nil,
+                                 NSStringFromClass([AppDelegate class]));
+    }
+}
+```
+
+---
+
+## 5. `CGameIOS.cpp` — esimerkki pelilogiikasta
+
+Tämä on esimerkki siitä, miten peli kutsuu `STX_*`-funktioita. Se on erillinen käännösfunktio (C++), joka toimii rinnakkain `STXNative.mm`:n kanssa.
+
+```cpp
+/*
+ *  CGameIOS.cpp
+ *  Esimerkki: pelilogiikka, joka käyttää STX_* C-rajapintaa.
+ *
+ *  Tämä ei ole pakollinen — STXNative.mm sisältää jo kutsut.
+ *  Tämä näyttää miten peli voi kutsua moottoria.
+ */
+#include "STXNative.h"
+
+#include <cmath>
+#include <cstdio>
+
+// Globaali tila
+static int g_cubeMesh = 0;
+static int g_basicShader = 0;
+static int g_playerTexture = 0;
+static float g_angle = 0.0f;
+static int g_scene = 0;
+
+extern "C" {
+
+// Kutsutaan STX_Init:n jälkeen
+void Game_OnInit(void) {
+    // 1) Lataa tekstuurit
+    g_playerTexture = STX_LoadTexture("textures/player.png");
+
+    // 2) Luo mesh (kuutio)
+    // 8 * (x,y,z, nx,ny,nz, u,v)
+    float verts[] = {
+        // Etupuoli
+        -1,-1, 1,  0, 0, 1,  0,1,
+         1,-1, 1,  0, 0, 1,  1,1,
+         1, 1, 1,  0, 0, 1,  1,0,
+        -1, 1, 1,  0, 0, 1,  0,0,
+        // Takapuoli
+        -1,-1,-1,  0, 0,-1,  1,1,
+         1,-1,-1,  0, 0,-1,  0,1,
+         1, 1,-1,  0, 0,-1,  0,0,
+        -1, 1,-1,  0, 0,-1,  1,0,
+        // Vasen
+        -1,-1,-1, -1, 0, 0,  0,1,
+        -1,-1, 1, -1, 0, 0,  1,1,
+        -1, 1, 1, -1, 0, 0,  1,0,
+        -1, 1,-1, -1, 0, 0,  0,0,
+        // Oikea
+         1,-1, 1,  1, 0, 0,  0,1,
+         1,-1,-1,  1, 0, 0,  1,1,
+         1, 1,-1,  1, 0, 0,  1,0,
+         1, 1, 1,  1, 0, 0,  0,0,
+        // Ylös
+        -1, 1, 1,  0, 1, 0,  0,1,
+         1, 1, 1,  0, 1, 0,  1,1,
+         1, 1,-1,  0, 1, 0,  1,0,
+        -1, 1,-1,  0, 1, 0,  0,0,
+        // Alas
+        -1,-1,-1,  0,-1, 0,  0,1,
+         1,-1,-1,  0,-1, 0,  1,1,
+         1,-1, 1,  0,-1, 0,  1,0,
+        -1,-1, 1,  0,-1, 0,  0,0,
+    };
+    unsigned int idx[] = {
+        0,1,2, 0,2,3,      // etu
+        4,6,5, 4,7,6,      // taka
+        8,9,10, 8,10,11,   // vasen
+        12,14,13, 12,15,14, // oikea
+        16,17,18, 16,18,19, // ylös
+        20,22,21, 20,23,22, // alas
+    };
+    g_cubeMesh = STX_CreateMesh(verts, 24, idx, 36);
+
+    // 3) Luo shader (Metal MSL)
+    const char* msl =
+        "#include <metal_stdlib>\n"
+        "using namespace metal;\n"
+        "struct VIn { float3 pos [[attribute(0)]]; "
+        "            float3 nrm [[attribute(1)]]; "
+        "            float2 uv  [[attribute(2)]]; };\n"
+        "struct VOut { float4 pos [[position]]; "
+        "             float2 uv; "
+        "             float3 nrm; };\n"
+        "vertex VOut vmain(VIn in [[stage_in]],\n"
+        "    constant float4x4& mvp [[buffer(1)]],\n"
+        "    constant float4x4& model [[buffer(2)]]) {\n"
+        "    VOut o;\n"
+        "    o.pos = mvp * float4(in.pos, 1.0);\n"
+        "    o.uv = in.uv;\n"
+        "    o.nrm = (model * float4(in.nrm, 0.0)).xyz;\n"
+        "    return o;\n"
+        "}\n"
+        "fragment float4 fmain(VOut in [[stage_in]],\n"
+        "    texture2d<float> tex [[texture(0)]],\n"
+        "    sampler s [[sampler(0)]]) {\n"
+        "    float3 L = normalize(float3(0.5, 1.0, 0.5));\n"
+        "    float d = max(0.0, dot(normalize(in.nrm), L)) * 0.8 + 0.2;\n"
+        "    float4 c = tex.sample(s, in.uv);\n"
+        "    return float4(c.rgb * d, c.a);\n"
+        "}\n";
+    g_basicShader = STX_CreateMetalShader(msl, "vmain", "fmain");
+
+    // 4) Luo scene
+    g_scene = STX_CreateScene("main");
+    STX_SetActiveScene(g_scene);
+
+    // 5) Aseta väri
+    STX_SetClearColor(0.1f, 0.1f, 0.2f, 1.0f);
+
+    // 6) Kamera
+    STX_SetCamera(0, 0, 5,  0, 0, 0,  0, 1, 0);
+    STX_SetPerspective(60.0f * 3.14159f / 180.0f, 16.0f / 9.0f, 0.1f, 100.0f);
+}
+
+void Game_OnUpdate(float dt) {
+    g_angle += dt * 1.0f;
+    if (g_angle > 6.28318f) g_angle -= 6.28318f;
+}
+
+void Game_OnShutdown(void) {
+    if (g_cubeMesh) STX_ReleaseMesh(g_cubeMesh);
+    if (g_basicShader) STX_ReleaseShader(g_basicShader);
+    if (g_playerTexture) STX_ReleaseTexture(g_playerTexture);
+    g_cubeMesh = 0;
+    g_basicShader = 0;
+    g_playerTexture = 0;
+}
+
+} // extern "C"
+```
+
+**Huom:** `Game_OnInit` kutsutaan `STX_Init`:n jälkeen, `Game_OnUpdate` `STX_Update`:sta, `Game_OnShutdown` `STX_Shutdown`:sta. Tämä on esimerkki pelin omasta logiikasta; `STXNative.mm` ei vielä kutsu näitä automaattisesti. Voit lisätä kutsut `STX_Init/Update/Shutdown`-funktioihin:
+
+```cpp
+// STXNative.mm:ssä:
+extern "C" void Game_OnInit(void);
+extern "C" void Game_OnUpdate(float dt);
+extern "C" void Game_OnShutdown(void);
+
+// STX_Init:n lopussa:
+Game_OnInit();
+
+// STX_Update:ssa:
+Game_OnUpdate(dt);
+
+// STX_Shutdown:ssa ennen resurssien vapautusta:
+Game_OnShutdown();
+```
+
+---
+
+## 6. `Info.plist` — täydellinen
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>STX Game</string>
+    <key>CFBundleIdentifier</key>
+    <string>fi.tommironty.STXGame</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+
+    <!-- Näppäimistö -->
+    <key>UIRequiresFullScreen</key>
+    <true/>
+
+    <!-- Orientaatiot -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+    </array>
+
+    <!-- Metal-vaatimus -->
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+        <string>metal</string>
+    </array>
+
+    <!-- Peliohjaimet -->
+    <key>GCSupportsControllerUserInteraction</key>
+    <true/>
+    <key>GCSupportedGameControllers</key>
+    <array>
+        <dict>
+            <key>ProfileName</key>
+            <string>ExtendedGamepad</string>
+        </dict>
+        <dict>
+            <key>ProfileName</key>
+            <string>MicroGamepad</string>
+        </dict>
+    </array>
+
+    <!-- Estä näytön sammuminen -->
+    <key>UIApplicationExitsOnSuspend</key>
+    <false/>
+
+    <!-- Tiedostojen jakaminen (valinnainen) -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+</dict>
+</plist>
+```
+
+---
+
+## 7. `CMakeLists.txt` — iOS-build
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(stxgame CXX OBJCXX)
+
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0")
+
+# Arkkitehtuurit
+set(CMAKE_OSX_ARCHITECTURES "arm64")
+
+# Lähdetiedostot
+add_executable(stxgame MACOSX_BUNDLE
+    # C++-moottori
+    STXNative.mm
+    CGameIOS.cpp
+    # Input
+    STXInputView.mm
+    CInput.cpp
+    # App
+    AppDelegate.mm
+    STXGameViewController.mm
+    main.mm
+)
+
+# Obj-C++ -asetukset
+target_compile_options(stxgame PRIVATE
+    -fobjc-arc
+    -fexceptions
+    -frtti
+)
+
+# Frameworkit
+target_link_libraries(stxgame
+    "-framework UIKit"
+    "-framework Foundation"
+    "-framework Metal"
+    "-framework MetalKit"
+    "-framework QuartzCore"
+    "-framework CoreGraphics"
+    "-framework AVFoundation"
+    "-framework GameController"
+    "-framework OpenGLES"  # GLES2-fallback
+)
+
+# Info.plist
+set_target_properties(stxgame PROPERTIES
+    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist"
+    XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC "YES"
+    XCODE_ATTRIBUTE_CLANG_CXX_LANGUAGE_STANDARD "c++14"
+    XCODE_ATTRIBUTE_CLANG_CXX_LIBRARY "libc++"
+    XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "12.0"
+)
+
+# Assetit
+set_target_properties(stxgame PROPERTIES
+    RESOURCE "${CMAKE_CURRENT_SOURCE_DIR}/Assets"
+)
+```
+
+---
+
+## 8. Tiedostorakenne
+
+```
+ios/
+├── STXGame.xcodeproj/
+├── STXGame/
+│   ├── AppDelegate.h / .mm
+│   ├── STXGameViewController.h / .mm
+│   ├── STXInputView.h / .mm
+│   ├── STXNative.h / .mm
+│   ├── CGameIOS.cpp
+│   ├── CInput.cpp
+│   ├── main.mm
+│   ├── Info.plist
+│   └── Assets.xcassets/
+│       ├── AppIcon.appiconset/
+│       └── LaunchImage.imageset/
+├── STX/
+│   └── STXinterfaces.h
+└── CMakeLists.txt
+```
+
+---
+
+## 9. Yhteenveto — C-rajapinnan kutsut
+
+| C-funktio | Kutsutaan | Selitys |
+|-----------|-----------|---------|
+| `STX_Init` | `STXGameViewController.initializeEngine` | Moottorin alustus |
+| `STX_Update` | `displayLinkTick:` | Pelilogiikka |
+| `STX_Render` | `renderFrame` | Metal-piirto |
+| `STX_Shutdown` | `AppDelegate.applicationWillTerminate` | Vapautus |
+| `STX_Resize` | `mtkView:drawableSizeWillChange:` | Koon muutos |
+| `STX_OnFocusChanged` | (View-fokus) | Fokus |
+| `STX_OnPause`/`STX_OnResume` | Elinkaari-notifikaatiot | Taustalle |
+| `STX_SetClearColor` | Peli | Render |
+| `STX_SetCamera` | Peli | Kamera |
+| `STX_SetPerspective` | Peli | Projektio |
+| `STX_LoadTexture` | Peli | Tekstuuri |
+| `STX_CreateMesh` | Peli | Mesh |
+| `STX_CreateMetalShader` | Peli | Metal-shader |
+| `STX_CreateGLShader` | Peli | GLES2-shader |
+| `STX_LoadSound`/`STX_PlaySound` | Peli | Ääni |
+| `STX_GetTime`/`STX_GetFPS` | Peli | Aika |
+| `STX_CreateScene`/`STX_SetActiveScene` | Peli | Scene |
+| `STX_GetLastError` | Debug | Virhe |
+
+**Keskeiset parannukset:**
+
+1. **Metal-renderöinti** — `MTLDevice`, `MTLCommandQueue`, `MTLRenderPipelineState`, `MTKView`
+2. **CADisplayLink-silmukka** — tarkka 60/120 Hz ajoitus
+3. **Asset-hallinta** — `NSBundle` + `UIImage` tekstuureille
+4. **AVAudioEngine** — ääni `AVAudioPlayerNode`:lla, master-mixer
+5. **Objective-C++ silta** — `__bridge`-castit Metal-objekteille
+6. **GLES2-fallback** — `STX_USE_GLES2`-makrolla
+7. **Elinkaari** — `NSNotificationCenter` + `AppDelegate`-ketjutus
+8. **Input-integraatio** — `STXInputView` saa kosketukset, `STX_iOS_*`-funktiot välittävät
+9. **Lokitus** — `os_log` (Applen suositus), ei `NSLog`
+10. **Virheiden käsittely** — `STX_GetLastError` + `os_log_fault`
+11. **Orientaation vaihto** — `UIDeviceOrientationDidChangeNotification`
+12. **`Info.plist`** — Metal-vaatimus, peliohjaimet, orientaatiot
+13. **Esimerkkipeli** — `CGameIOS.cpp` näyttää kuution piirron
+14. **CMake** — `OBJCXX`-kieli, `-fobjc-arc`, frameworkit

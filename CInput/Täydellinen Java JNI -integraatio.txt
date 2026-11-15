@@ -1,0 +1,1294 @@
+# Täydellinen Java JNI -koodi Androidille
+
+Alla on **täydellinen, tuotantokelpoinen** Java-puolen JNI-koodi. Se on suunniteltu toimimaan yhdessä edellisen `CInput.cpp`-natiivi-toteutuksen kanssa.
+
+**Tiedostot:**
+1. `AndroidInputBridge.java` — pää-JNI-silta
+2. `AndroidInputActivity.java` — esimerkki Activity
+3. `AndroidTextInputView.java` — IME-kompositio
+4. `AndroidInputHelper.java` — apuluokka elinkaarelle
+5. `NativeLoader.java` — kirjaston lataus
+
+---
+
+## 1. `NativeLoader.java` — natiivikirjaston lataus
+
+```java
+package fi.tommironty.STX;
+
+import android.util.Log;
+
+/**
+ * NativeLoader — keskittää natiivikirjastojen latauksen.
+ *
+ * Käyttö:
+ *   NativeLoader.ensureLoaded();
+ *   // ... sen jälkeen voi kutsua native-metodeja
+ *
+ * Tämä luokka on idempotentti: useat kutsut eivät lataa uudelleen.
+ */
+public final class NativeLoader {
+
+    private static final String TAG = "STX.NativeLoader";
+
+    /** Natiivi-input-kirjasto (CInput.cpp). */
+    public static final String LIB_INPUT = "stxinput";
+    /** Pelin oma natiivikirjasto (valinnainen). */
+    public static final String LIB_GAME  = "stxgame";
+
+    private static volatile boolean inputLoaded = false;
+    private static volatile boolean gameLoaded  = false;
+    private static volatile Throwable inputError = null;
+    private static volatile Throwable gameError  = null;
+
+    private NativeLoader() {}
+
+    /**
+     * Lataa input-kirjasto. Heittää RuntimeException, jos lataus epäonnistuu.
+     */
+    public static synchronized void ensureInputLoaded() {
+        if (inputLoaded) return;
+        if (inputError != null) {
+            throw new RuntimeException("stxinput library failed to load", inputError);
+        }
+        try {
+            System.loadLibrary(LIB_INPUT);
+            inputLoaded = true;
+            Log.i(TAG, "Loaded lib" + LIB_INPUT + ".so");
+        } catch (Throwable t) {
+            inputError = t;
+            Log.e(TAG, "Failed to load lib" + LIB_INPUT + ".so", t);
+            throw new RuntimeException("Failed to load " + LIB_INPUT, t);
+        }
+    }
+
+    /**
+     * Lataa pelin oma kirjasto (valinnainen). Ei heitä poikkeusta.
+     * @return true jos lataus onnistui tai oli jo ladattu.
+     */
+    public static synchronized boolean tryLoadGameLibrary() {
+        if (gameLoaded) return true;
+        if (gameError != null) return false;
+        try {
+            System.loadLibrary(LIB_GAME);
+            gameLoaded = true;
+            Log.i(TAG, "Loaded lib" + LIB_GAME + ".so");
+            return true;
+        } catch (Throwable t) {
+            gameError = t;
+            Log.w(TAG, "Could not load lib" + LIB_GAME + ".so (optional)", t);
+            return false;
+        }
+    }
+
+    public static boolean isInputLoaded() { return inputLoaded; }
+    public static boolean isGameLoaded()  { return gameLoaded;  }
+    public static Throwable getInputError() { return inputError; }
+    public static Throwable getGameError()  { return gameError;  }
+}
+```
+
+---
+
+## 2. `AndroidInputBridge.java` — täydellinen JNI-silta
+
+```java
+package fi.tommironty.STX;
+
+import android.app.Activity;
+import android.content.Context;
+import android.hardware.input.InputManager;
+import android.os.Build;
+import android.util.Log;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.inputmethod.InputMethodManager;
+
+import java.lang.ref.WeakReference;
+
+/**
+ * AndroidInputBridge — JNI-silta natiivin STX-input-järjestelmän ja
+ * Androidin InputFramewordin välillä.
+ *
+ * == Käyttö ==
+ *
+ * Activity.onCreate():
+ *   bridge = new AndroidInputBridge(this);
+ *   bridge.install();
+ *
+ * Activity.onPause():   bridge.onPause();
+ * Activity.onResume():  bridge.onResume();
+ * Activity.onDestroy(): bridge.onDestroy();
+ *
+ * == JNI-yhteensopivuus ==
+ *
+ * Jokainen alla oleva private static native -metodi vastaa C++-puolella
+ * funktiota, jonka nimi on muotoa:
+ *   Java_fi_tommironty_STX_AndroidInputBridge_<metodinNimi>
+ *
+ * Metodien allekirjoitukset on pidettävä synkronissa C++-toteutuksen kanssa.
+ * Jos muutat tyyppejä, päivitä myös CInput.cpp.
+ */
+public class AndroidInputBridge {
+
+    private static final String TAG = "STX.InputBridge";
+
+    // ==================================================================
+    // Natiivimetodit
+    // ==================================================================
+    // HUOM: kaikki ovat private static; kutsutaan vain sisältä.
+    // JNI-nimet vastaavat C++-toteutusta.
+
+    /** Näppäimistötapahtuma. action = KeyEvent.ACTION_*. */
+    private static native void nativeKeyEvent(
+            int action, int keyCode, int metaState, int unicodeChar,
+            int deviceId, long eventTime);
+
+    /** Kosketustapahtuma. action = MotionEvent.ACTION_*. */
+    private static native void nativeTouchEvent(
+            int action, int pointerIndex, int pointerId,
+            float x, float y, float pressure,
+            int deviceId, long eventTime);
+
+    /** Generic motion (hiiri, joystick-akselit). */
+    private static native void nativeGenericMotion(
+            int action, int source, float x, float y, long eventTime);
+
+    /** Tekstinsyöttö (UTF-8). */
+    private static native void nativeTextInput(String text);
+
+    /** Fokuksen vaihtuminen. */
+    private static native void nativeFocusChange(boolean hasFocus);
+
+    /** Sovellus meni taustalle. */
+    private static native void nativePause();
+
+    /** Sovellus palasi etualalle. */
+    private static native void nativeResume();
+
+    /** Sovellus tuhotaan. */
+    private static native void nativeDestroy();
+
+    /** Koon muutos (esim. kierto). */
+    private static native void nativeResize(int width, int height);
+
+    /** Hiiren liike (iPadOS-tyylinen; Android-x86 / ChromeOS). */
+    private static native void nativeMouseMotion(
+            float x, float y, float dx, float dy, int buttonMask);
+
+    /** Hiiren painike. button: 0=left, 1=right, 2=middle. */
+    private static native void nativeMouseButton(int button, int pressed);
+
+    /** Peliohjaimen akseli. */
+    private static native void nativeGamepadAxis(
+            int controllerIndex, int axisIndex, float x, float y);
+
+    /** Peliohjaimen painike. */
+    private static native void nativeGamepadButton(
+            int controllerIndex, int buttonIndex, int pressed);
+
+    /** Peliohjain liitetty. */
+    private static native void nativeGamepadConnected(
+            int controllerIndex, int controllerType);
+
+    /** Peliohjain irrotettu. */
+    private static native void nativeGamepadDisconnected(int controllerIndex);
+
+    static {
+        // Lataa natiivikirjasto. Käytetään NativeLoaderia, jotta
+        // virheet kirjataan ja ne voi tarkistaa.
+        try {
+            NativeLoader.ensureInputLoaded();
+        } catch (Throwable t) {
+            Log.e(TAG, "CRITICAL: stxinput not loaded; native calls will fail", t);
+        }
+    }
+
+    // ==================================================================
+    // Instanssin tila
+    // ==================================================================
+    private final WeakReference<Activity> activityRef;
+    private View targetView;
+    private final InputMethodManager imm;
+    private boolean installed = false;
+    private boolean paused = false;
+    private boolean destroyed = false;
+
+    // Hiiren tila (generic motion)
+    private float lastMouseX = 0f;
+    private float lastMouseY = 0f;
+    private int   mouseButtons = 0;
+
+    // ==================================================================
+    // Konstruktori
+    // ==================================================================
+    public AndroidInputBridge(Activity activity) {
+        if (activity == null) throw new IllegalArgumentException("activity == null");
+        this.activityRef = new WeakReference<>(activity);
+        this.imm = (InputMethodManager) activity.getSystemService(Context.INPUT_METHOD_SERVICE);
+    }
+
+    // ==================================================================
+    // Asennus
+    // ==================================================================
+
+    /**
+     * Asentaa input-kuuntelijat Activityn decorView'iin.
+     * Kutsutaan Activity.onCreate():n lopussa setContentView:n jälkeen.
+     */
+    public void install() {
+        if (installed || destroyed) return;
+        Activity activity = activityRef.get();
+        if (activity == null) {
+            Log.w(TAG, "install(): activity already GC'd");
+            return;
+        }
+        View decor = activity.getWindow().getDecorView();
+        installOn(decor);
+    }
+
+    /**
+     * Asentaa input-kuuntelijat tiettyyn näkymään (esim. GLSurfaceView).
+     */
+    public void installOn(View view) {
+        if (installed || destroyed || view == null) return;
+        this.targetView = view;
+        this.installed = true;
+
+        view.setOnKeyListener((v, keyCode, event) -> handleKeyEvent(event));
+        view.setOnTouchListener((v, event) -> handleTouchEvent(event));
+        view.setOnGenericMotionListener((v, event) -> handleGenericMotion(event));
+        view.setOnFocusChangeListener((v, hasFocus) -> {
+            try {
+                nativeFocusChange(hasFocus);
+            } catch (Throwable t) {
+                Log.e(TAG, "nativeFocusChange failed", t);
+            }
+        });
+
+        view.setFocusable(true);
+        view.setFocusableInTouchMode(true);
+        view.requestFocus();
+    }
+
+    public void uninstall() {
+        if (!installed) return;
+        installed = false;
+        if (targetView != null) {
+            targetView.setOnKeyListener(null);
+            targetView.setOnTouchListener(null);
+            targetView.setOnGenericMotionListener(null);
+            targetView.setOnFocusChangeListener(null);
+        }
+        targetView = null;
+    }
+
+    // ==================================================================
+    // Näppäimistö
+    // ==================================================================
+    private boolean handleKeyEvent(KeyEvent event) {
+        if (paused || destroyed) return false;
+        try {
+            int action = event.getAction();
+            int keyCode = event.getKeyCode();
+            int meta = event.getMetaState();
+            int unicode = event.getUnicodeChar(meta);
+            int deviceId = event.getDeviceId();
+            long time = event.getEventTime();
+
+            nativeKeyEvent(action, keyCode, meta, unicode, deviceId, time);
+
+            // BACK: älä syö, jotta Activity voi sulkeutua.
+            // (Jos peli haluaa käsitellä, tee oma logiikka tähän.)
+            return false;
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeKeyEvent failed", t);
+            return false;
+        }
+    }
+
+    // ==================================================================
+    // Kosketus
+    // ==================================================================
+    private boolean handleTouchEvent(MotionEvent event) {
+        if (paused || destroyed) return false;
+        try {
+            final int actionMasked = event.getActionMasked();
+            final int deviceId = event.getDeviceId();
+            final long time = event.getEventTime();
+            final int pointerCount = event.getPointerCount();
+
+            switch (actionMasked) {
+                case MotionEvent.ACTION_DOWN:
+                case MotionEvent.ACTION_POINTER_DOWN:
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_POINTER_UP: {
+                    int idx = event.getActionIndex();
+                    int id = event.getPointerId(idx);
+                    float x = event.getX(idx);
+                    float y = event.getY(idx);
+                    float p = event.getPressure(idx);
+                    nativeTouchEvent(actionMasked, idx, id, x, y, p, deviceId, time);
+                    break;
+                }
+                case MotionEvent.ACTION_MOVE: {
+                    for (int i = 0; i < pointerCount; i++) {
+                        int id = event.getPointerId(i);
+                        float x = event.getX(i);
+                        float y = event.getY(i);
+                        float p = event.getPressure(i);
+                        nativeTouchEvent(actionMasked, i, id, x, y, p, deviceId, time);
+                    }
+                    break;
+                }
+                case MotionEvent.ACTION_CANCEL: {
+                    nativeTouchEvent(actionMasked, 0, -1, 0f, 0f, 0f, deviceId, time);
+                    break;
+                }
+                default:
+                    return false;
+            }
+            return true;
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeTouchEvent failed", t);
+            return false;
+        }
+    }
+
+    // ==================================================================
+    // Generic motion
+    // ==================================================================
+    private boolean handleGenericMotion(MotionEvent event) {
+        if (paused || destroyed) return false;
+        try {
+            int action = event.getActionMasked();
+            int source = event.getSource();
+            long time = event.getEventTime();
+
+            // Peliohjain
+            if ((source & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
+                    || (source & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD) {
+                int controllerIndex = controllerIndexOf(event.getDevice());
+                float x = event.getAxisValue(MotionEvent.AXIS_X);
+                float y = event.getAxisValue(MotionEvent.AXIS_Y);
+                nativeGamepadAxis(controllerIndex, 0, x, y);
+
+                float z = event.getAxisValue(MotionEvent.AXIS_RZ);
+                float rz = event.getAxisValue(MotionEvent.AXIS_RX);
+                nativeGamepadAxis(controllerIndex, 1, rz, z);
+
+                float ltrig = event.getAxisValue(MotionEvent.AXIS_LTRIGGER);
+                float rtrig = event.getAxisValue(MotionEvent.AXIS_RTRIGGER);
+                nativeGamepadAxis(controllerIndex, 2, ltrig, 0f);
+                nativeGamepadAxis(controllerIndex, 3, rtrig, 0f);
+
+                float hatX = event.getAxisValue(MotionEvent.AXIS_HAT_X);
+                float hatY = event.getAxisValue(MotionEvent.AXIS_HAT_Y);
+                nativeGamepadAxis(controllerIndex, 4, hatX, hatY);
+                return true;
+            }
+
+            // Hiiri
+            if ((source & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
+                float x = event.getX();
+                float y = event.getY();
+                float dx = x - lastMouseX;
+                float dy = y - lastMouseY;
+                lastMouseX = x;
+                lastMouseY = y;
+                nativeMouseMotion(x, y, dx, dy, mouseButtons);
+                return true;
+            }
+
+            return false;
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeGenericMotion failed", t);
+            return false;
+        }
+    }
+
+    // ==================================================================
+    // Peliohjainten tunnistus
+    // ==================================================================
+    private static int controllerIndexOf(InputDevice device) {
+        if (device == null) return 0;
+        // Yksinkertainen: käytetään deviceId:n alaosaa. Parempi olisi
+        // pitää HashMap<deviceId, index>, mutta yksinkertaistuksen vuoksi
+        // käytetään deviceId:tä suoraan (0-3 rajoitus).
+        return device.getId() & 0x03;
+    }
+
+    /** Kutsutaan, kun peliohjain liitetään (esim. BroadcastReceiveristä). */
+    public void onGamepadConnected(InputDevice device) {
+        if (device == null || destroyed) return;
+        int idx = controllerIndexOf(device);
+        int type = (device.getSources() & InputDevice.SOURCE_GAMEPAD) != 0 ? 1 : 0;
+        try {
+            nativeGamepadConnected(idx, type);
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeGamepadConnected failed", t);
+        }
+    }
+
+    /** Kutsutaan, kun peliohjain irrotetaan. */
+    public void onGamepadDisconnected(InputDevice device) {
+        if (device == null || destroyed) return;
+        int idx = controllerIndexOf(device);
+        try {
+            nativeGamepadDisconnected(idx);
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeGamepadDisconnected failed", t);
+        }
+    }
+
+    // ==================================================================
+    // Tekstinsyöttö (IME)
+    // ==================================================================
+    public void onTextInput(String text) {
+        if (paused || destroyed || text == null || text.isEmpty()) return;
+        try {
+            nativeTextInput(text);
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeTextInput failed", t);
+        }
+    }
+
+    public void showSoftKeyboard() {
+        Activity activity = activityRef.get();
+        if (activity == null || imm == null) return;
+        View v = (targetView != null) ? targetView : activity.getWindow().getDecorView();
+        v.requestFocus();
+        imm.showSoftInput(v, InputMethodManager.SHOW_IMPLICIT);
+    }
+
+    public void hideSoftKeyboard() {
+        Activity activity = activityRef.get();
+        if (activity == null || imm == null) return;
+        View v = activity.getWindow().getDecorView();
+        imm.hideSoftInputFromWindow(v.getWindowToken(), 0);
+    }
+
+    // ==================================================================
+    // Koon muutos
+    // ==================================================================
+    public void onResize(int width, int height) {
+        if (destroyed) return;
+        try {
+            nativeResize(width, height);
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeResize failed", t);
+        }
+    }
+
+    // ==================================================================
+    // Elinkaari
+    // ==================================================================
+    public void onPause() {
+        if (paused || destroyed) return;
+        paused = true;
+        try {
+            nativePause();
+        } catch (Throwable t) {
+            Log.e(TAG, "nativePause failed", t);
+        }
+    }
+
+    public void onResume() {
+        if (destroyed) return;
+        paused = false;
+        try {
+            nativeResume();
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeResume failed", t);
+        }
+    }
+
+    public void onDestroy() {
+        if (destroyed) return;
+        destroyed = true;
+        try {
+            nativeDestroy();
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeDestroy failed", t);
+        }
+        uninstall();
+    }
+
+    // ==================================================================
+    // Getterit
+    // ==================================================================
+    public Activity getActivity() { return activityRef.get(); }
+    public View getTargetView()   { return targetView; }
+    public boolean isInstalled()  { return installed; }
+    public boolean isPaused()     { return paused; }
+    public boolean isDestroyed()  { return destroyed; }
+}
+```
+
+---
+
+## 3. `AndroidInputActivity.java` — täydellinen esimerkki
+
+```java
+package fi.tommironty.STX;
+
+import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.res.Configuration;
+import android.hardware.input.InputManager;
+import android.os.Build;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.InputDevice;
+import android.view.View;
+import android.view.WindowManager;
+
+/**
+ * AndroidInputActivity — täydellinen esimerkki Activitystä, joka
+ * integroi AndroidInputBridgen ja natiivin pelin.
+ *
+ * Tämä Activity toimii pohjana oikealle pelille: peri tästä tai
+ * kopioi elinkaarikoodi omaan Activityysi.
+ */
+public class AndroidInputActivity extends Activity {
+
+    private static final String TAG = "STX.Activity";
+
+    // Natiivi peli
+    private static native boolean nativeInit(String filesDir, int width, int height);
+    private static native void    nativeResize(int width, int height);
+    private static native void    nativeRender();
+    private static native void    nativeShutdown();
+
+    private AndroidInputBridge inputBridge;
+    private AndroidTextInputView textInput;
+    private View gameView;
+    private boolean nativeInitialized = false;
+
+    // Peliohjainten BroadcastReceiver
+    private final BroadcastReceiver gamepadReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (InputManager.ACTION_INPUT_DEVICE_ADDED.equals(action)) {
+                InputDevice device = intent.getParcelableExtra(InputManager.EXTRA_INPUT_DEVICE);
+                if (device != null && inputBridge != null) {
+                    inputBridge.onGamepadConnected(device);
+                }
+            } else if (InputManager.ACTION_INPUT_DEVICE_REMOVED.equals(action)) {
+                InputDevice device = intent.getParcelableExtra(InputManager.EXTRA_INPUT_DEVICE);
+                if (device != null && inputBridge != null) {
+                    inputBridge.onGamepadDisconnected(device);
+                }
+            }
+        }
+    };
+
+    // Renderöintisilmukka (yksinkertaistettu)
+    private Thread renderThread;
+    private volatile boolean running = false;
+
+    static {
+        // Lataa natiivikirjastot
+        try {
+            NativeLoader.ensureInputLoaded();
+            NativeLoader.tryLoadGameLibrary();
+        } catch (Throwable t) {
+            Log.e(TAG, "Failed to load native libraries", t);
+        }
+    }
+
+    // ==================================================================
+    // onCreate
+    // ==================================================================
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        Log.i(TAG, "onCreate");
+
+        // Estä näytön sammuminen
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        // Luo pelin näkymä (oikea peli käyttäisi GLSurfaceView:tä)
+        gameView = createGameView();
+        setContentView(gameView);
+
+        // Asenna input-silta
+        inputBridge = new AndroidInputBridge(this);
+        inputBridge.installOn(gameView);
+
+        // (Valinnainen) IME-tekstinsyöttö
+        if (gameView instanceof android.view.ViewGroup) {
+            textInput = new AndroidTextInputView(this, inputBridge);
+            textInput.attachTo((android.view.ViewGroup) gameView);
+        }
+
+        // Rekisteröi peliohjainten BroadcastReceiver
+        registerGamepadReceiver();
+
+        // Käynnistä natiivi peli
+        startNativeGame();
+    }
+
+    private View createGameView() {
+        // Oikea peli loisi GLSurfaceView:n. Tässä esimerkissä
+        // yksinkertainen View, joka ei renderöi mitään.
+        View v = new View(this);
+        v.setBackgroundColor(0xFF000000);
+        return v;
+    }
+
+    private void startNativeGame() {
+        try {
+            int w = gameView.getWidth();
+            int h = gameView.getHeight();
+            if (w == 0 || h == 0) {
+                // Käytä ruudun kokoa
+                w = getResources().getDisplayMetrics().widthPixels;
+                h = getResources().getDisplayMetrics().heightPixels;
+            }
+            String filesDir = getFilesDir().getAbsolutePath();
+            nativeInitialized = nativeInit(filesDir, w, h);
+            if (nativeInitialized) {
+                Log.i(TAG, "Native game initialized: " + w + "x" + h);
+                startRenderLoop();
+            } else {
+                Log.e(TAG, "nativeInit returned false");
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "nativeInit failed", t);
+        }
+    }
+
+    private void startRenderLoop() {
+        running = true;
+        renderThread = new Thread(() -> {
+            while (running) {
+                try {
+                    nativeRender();
+                    // ~60 FPS
+                    Thread.sleep(16);
+                } catch (InterruptedException e) {
+                    break;
+                } catch (Throwable t) {
+                    Log.e(TAG, "Render loop error", t);
+                }
+            }
+        }, "STX-Render");
+        renderThread.start();
+    }
+
+    private void stopRenderLoop() {
+        running = false;
+        if (renderThread != null) {
+            try {
+                renderThread.join(1000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            renderThread = null;
+        }
+    }
+
+    // ==================================================================
+    // Peliohjainten rekisteröinti
+    // ==================================================================
+    private void registerGamepadReceiver() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN) return;
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(InputManager.ACTION_INPUT_DEVICE_ADDED);
+        filter.addAction(InputManager.ACTION_INPUT_DEVICE_REMOVED);
+        registerReceiver(gamepadReceiver, filter);
+
+        // Ilmoita jo liitetyistä ohjaimista
+        InputManager im = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        if (im != null) {
+            int[] ids = im.getInputDeviceIds();
+            for (int id : ids) {
+                InputDevice dev = im.getInputDevice(id);
+                if (dev != null && inputBridge != null) {
+                    inputBridge.onGamepadConnected(dev);
+                }
+            }
+        }
+    }
+
+    private void unregisterGamepadReceiver() {
+        try {
+            unregisterReceiver(gamepadReceiver);
+        } catch (IllegalArgumentException e) {
+            // ei ollut rekisteröity
+        }
+    }
+
+    // ==================================================================
+    // Elinkaari
+    // ==================================================================
+    @Override
+    protected void onStart() {
+        super.onStart();
+        Log.i(TAG, "onStart");
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        Log.i(TAG, "onResume");
+        if (inputBridge != null) inputBridge.onResume();
+    }
+
+    @Override
+    protected void onPause() {
+        Log.i(TAG, "onPause");
+        if (inputBridge != null) inputBridge.onPause();
+        super.onPause();
+    }
+
+    @Override
+    protected void onStop() {
+        Log.i(TAG, "onStop");
+        super.onStop();
+    }
+
+    @Override
+    protected void onDestroy() {
+        Log.i(TAG, "onDestroy");
+        stopRenderLoop();
+        if (nativeInitialized) {
+            try { nativeShutdown(); } catch (Throwable t) { Log.e(TAG, "nativeShutdown", t); }
+            nativeInitialized = false;
+        }
+        unregisterGamepadReceiver();
+        if (inputBridge != null) {
+            inputBridge.onDestroy();
+            inputBridge = null;
+        }
+        textInput = null;
+        super.onDestroy();
+    }
+
+    // ==================================================================
+    // Koon / konfiguraation muutos
+    // ==================================================================
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        int w = newConfig.screenWidthDp;
+        int h = newConfig.screenHeightDp;
+        Log.i(TAG, "onConfigurationChanged: " + w + "x" + h);
+        // oikea koko saadaan View:stä
+        if (gameView != null && inputBridge != null) {
+            inputBridge.onResize(gameView.getWidth(), gameView.getHeight());
+        }
+        if (nativeInitialized) {
+            try { nativeResize(gameView.getWidth(), gameView.getHeight()); }
+            catch (Throwable t) { Log.e(TAG, "nativeResize", t); }
+        }
+    }
+
+    // ==================================================================
+    // Back-näppäin
+    // ==================================================================
+    @Override
+    public void onBackPressed() {
+        // Natiivi sai key eventin ensin (handleKeyEvent).
+        // Jos peli haluaa käsitellä, se voi ylikirjoittaa tämän.
+        super.onBackPressed();
+    }
+
+    // ==================================================================
+    // Tekstinsyötön apumetodit
+    // ==================================================================
+    public void showKeyboard() {
+        if (textInput != null) textInput.showKeyboard();
+    }
+
+    public void hideKeyboard() {
+        if (textInput != null) textInput.hideKeyboard();
+    }
+
+    public void insertTextFromIME(String text) {
+        if (textInput != null) textInput.insertTextFromIME(text);
+    }
+}
+```
+
+---
+
+## 4. `AndroidTextInputView.java` — IME-kompositio
+
+```java
+package fi.tommironty.STX;
+
+import android.content.Context;
+import android.text.InputType;
+import android.util.Log;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.inputmethod.BaseInputConnection;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputConnection;
+import android.view.inputmethod.InputMethodManager;
+
+/**
+ * AndroidTextInputView — näkymä, joka tukee IME-kompositiota
+ * (CJK, ennustava syöte, ääkköset).
+ *
+ * Käyttö:
+ *   AndroidTextInputView text = new AndroidTextInputView(activity, bridge);
+ *   text.attachTo(rootViewGroup);
+ *   text.showKeyboard();
+ */
+public class AndroidTextInputView extends View {
+
+    private static final String TAG = "STX.TextInput";
+
+    private final AndroidInputBridge bridge;
+    private final StringBuilder composing = new StringBuilder();
+    private final StringBuilder committed = new StringBuilder();
+
+    public AndroidTextInputView(Context context, AndroidInputBridge bridge) {
+        super(context);
+        if (bridge == null) throw new IllegalArgumentException("bridge == null");
+        this.bridge = bridge;
+        setFocusable(true);
+        setFocusableInTouchMode(true);
+        setAlpha(0.01f); // näkymätön mutta saa fokuksen
+    }
+
+    /** Liittää näkymän parenttiin (koko 1x1, näkymätön). */
+    public void attachTo(ViewGroup parent) {
+        if (parent == null) return;
+        // Poista jos jo liitetty
+        if (getParent() != null) {
+            ((ViewGroup) getParent()).removeView(this);
+        }
+        parent.addView(this, new ViewGroup.LayoutParams(1, 1));
+    }
+
+    public void detach() {
+        if (getParent() instanceof ViewGroup) {
+            ((ViewGroup) getParent()).removeView(this);
+        }
+    }
+
+    // ==================================================================
+    // Näppäimistön hallinta
+    // ==================================================================
+    public void showKeyboard() {
+        requestFocus();
+        InputMethodManager imm = (InputMethodManager)
+                getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) {
+            imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT);
+        }
+    }
+
+    public void hideKeyboard() {
+        InputMethodManager imm = (InputMethodManager)
+                getContext().getSystemService(Context.INPUT_METHOD_SERVICE);
+        if (imm != null) {
+            imm.hideSoftInputFromWindow(getWindowToken(), 0);
+        }
+    }
+
+    // ==================================================================
+    // IME-tuki
+    // ==================================================================
+    @Override
+    public boolean onCheckIsTextEditor() {
+        return true;
+    }
+
+    @Override
+    public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN
+                | EditorInfo.IME_ACTION_NONE;
+        return new BaseInputConnection(this, true) {
+
+            @Override
+            public boolean commitText(CharSequence text, int newCursorPosition) {
+                if (text != null && text.length() > 0) {
+                    String s = text.toString();
+                    composing.setLength(0);
+                    committed.append(s);
+                    try {
+                        bridge.onTextInput(s);
+                    } catch (Throwable t) {
+                        Log.e(TAG, "commitText failed", t);
+                    }
+                }
+                return super.commitText(text, newCursorPosition);
+            }
+
+            @Override
+            public boolean setComposingText(CharSequence text, int newCursorPosition) {
+                if (text != null) {
+                    composing.setLength(0);
+                    composing.append(text);
+                }
+                return super.setComposingText(text, newCursorPosition);
+            }
+
+            @Override
+            public boolean finishComposingText() {
+                if (composing.length() > 0) {
+                    String s = composing.toString();
+                    composing.setLength(0);
+                    committed.append(s);
+                    try {
+                        bridge.onTextInput(s);
+                    } catch (Throwable t) {
+                        Log.e(TAG, "finishComposingText failed", t);
+                    }
+                }
+                return super.finishComposingText();
+            }
+
+            @Override
+            public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+                // Backspace: välitä natiiville
+                for (int i = 0; i < beforeLength; i++) {
+                    try {
+                        bridge.onTextInput("\b");
+                    } catch (Throwable t) {
+                        Log.e(TAG, "deleteSurroundingText failed", t);
+                    }
+                    if (committed.length() > 0) {
+                        committed.setLength(committed.length() - 1);
+                    }
+                }
+                return super.deleteSurroundingText(beforeLength, afterLength);
+            }
+        };
+    }
+
+    // ==================================================================
+    // Suora tekstinsyöttö (esim. testaukseen tai natiivin kutsumana)
+    // ==================================================================
+    public void insertTextFromIME(String text) {
+        if (text == null || text.isEmpty()) return;
+        committed.append(text);
+        try {
+            bridge.onTextInput(text);
+        } catch (Throwable t) {
+            Log.e(TAG, "insertTextFromIME failed", t);
+        }
+    }
+
+    public String getCommittedText() {
+        return committed.toString();
+    }
+
+    public void clearCommittedText() {
+        committed.setLength(0);
+    }
+}
+```
+
+---
+
+## 5. `AndroidInputHelper.java` — elinkaaren apuluokka
+
+```java
+package fi.tommironty.STX;
+
+import android.app.Activity;
+import android.app.Application;
+import android.os.Bundle;
+import android.util.Log;
+
+import java.lang.ref.WeakReference;
+
+/**
+ * AndroidInputHelper — Application.ActivityLifecycleCallbacks -pohjainen
+ * apuluokka, joka huolehtii AndroidInputBridgen elinkaaresta automaattisesti.
+ *
+ * Käyttö Application.onCreate():ssa:
+ *   AndroidInputHelper.install(application);
+ *
+ * Tämän jälkeen jokainen Activity, joka luo AndroidInputBridgen ja
+ * kutsuu install()/installOn(), saa automaattisesti onPause/onResume/
+ * onDestroy -kutsut — Activityn ei tarvitse ketjuttaa niitä manuaalisesti.
+ *
+ * HUOM: Activityn omat onPause/onResume/onDestroy-kutsut ovat edelleen
+ * suositeltuja; tämä apuluokka on varasuunnitelma.
+ */
+public final class AndroidInputHelper implements Application.ActivityLifecycleCallbacks {
+
+    private static final String TAG = "STX.InputHelper";
+    private static final AndroidInputHelper INSTANCE = new AndroidInputHelper();
+
+    private WeakReference<Activity> currentActivity = new WeakReference<>(null);
+    private WeakReference<AndroidInputBridge> currentBridge = new WeakReference<>(null);
+
+    private AndroidInputHelper() {}
+
+    /** Asentaa automaattisen elinkaaren seurannan. Idempotentti. */
+    public static void install(Application app) {
+        if (app == null) return;
+        app.registerActivityLifecycleCallbacks(INSTANCE);
+        Log.i(TAG, "Installed ActivityLifecycleCallbacks");
+    }
+
+    /** Rekisteröi nykyinen bridge (kutsutaan Activity.onCreate():ssa). */
+    public static void setCurrentBridge(Activity activity, AndroidInputBridge bridge) {
+        INSTANCE.currentActivity = new WeakReference<>(activity);
+        INSTANCE.currentBridge = new WeakReference<>(bridge);
+    }
+
+    /** Hakee nykyisen bridgen. */
+    public static AndroidInputBridge getCurrentBridge() {
+        return INSTANCE.currentBridge.get();
+    }
+
+    // ==================================================================
+    // ActivityLifecycleCallbacks
+    // ==================================================================
+    @Override
+    public void onActivityCreated(Activity activity, Bundle savedInstanceState) {
+        Log.d(TAG, "onActivityCreated: " + activity.getClass().getSimpleName());
+    }
+
+    @Override
+    public void onActivityStarted(Activity activity) {
+        Log.d(TAG, "onActivityStarted: " + activity.getClass().getSimpleName());
+    }
+
+    @Override
+    public void onActivityResumed(Activity activity) {
+        Log.d(TAG, "onActivityResumed: " + activity.getClass().getSimpleName());
+        AndroidInputBridge bridge = currentBridge.get();
+        if (bridge != null && currentActivity.get() == activity) {
+            bridge.onResume();
+        }
+    }
+
+    @Override
+    public void onActivityPaused(Activity activity) {
+        Log.d(TAG, "onActivityPaused: " + activity.getClass().getSimpleName());
+        AndroidInputBridge bridge = currentBridge.get();
+        if (bridge != null && currentActivity.get() == activity) {
+            bridge.onPause();
+        }
+    }
+
+    @Override
+    public void onActivityStopped(Activity activity) {
+        Log.d(TAG, "onActivityStopped: " + activity.getClass().getSimpleName());
+    }
+
+    @Override
+    public void onActivitySaveInstanceState(Activity activity, Bundle outState) {
+        // ei tarvita
+    }
+
+    @Override
+    public void onActivityDestroyed(Activity activity) {
+        Log.d(TAG, "onActivityDestroyed: " + activity.getClass().getSimpleName());
+        AndroidInputBridge bridge = currentBridge.get();
+        if (bridge != null && currentActivity.get() == activity) {
+            bridge.onDestroy();
+            currentActivity = new WeakReference<>(null);
+            currentBridge = new WeakReference<>(null);
+        }
+    }
+}
+```
+
+---
+
+## 6. `STXApplication.java` — Application-luokka
+
+```java
+package fi.tommironty.STX;
+
+import android.app.Application;
+
+/**
+ * STXApplication — Application-luokka, joka asentaa AndroidInputHelperin.
+ *
+ * Rekisteröi AndroidManifest.xml:ssä:
+ *   <application android:name=".STXApplication" ...>
+ */
+public class STXApplication extends Application {
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+
+        // Lataa natiivikirjastot
+        try {
+            NativeLoader.ensureInputLoaded();
+        } catch (Throwable t) {
+            // Virhe kirjataan; sovellus voi jatkaa ilman natiivia
+        }
+        NativeLoader.tryLoadGameLibrary();
+
+        // Asenna automaattinen elinkaaren seuranta
+        AndroidInputHelper.install(this);
+    }
+}
+```
+
+---
+
+## 7. `AndroidManifest.xml` — täydellinen
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="fi.tommironty.STX"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <!-- Laitteistovaatimukset (valinnaiset) -->
+    <uses-feature android:name="android.hardware.touchscreen"
+                  android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad"
+                  android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host"
+                  android:required="false" />
+    <uses-feature android:name="android.hardware.vulkan.level"
+                  android:version="1" android:required="false" />
+    <uses-feature android:glEsVersion="0x00020000"
+                  android:required="true" />
+
+    <!-- Sovellus -->
+    <application
+        android:name=".STXApplication"
+        android:label="STX Game"
+        android:icon="@mipmap/ic_launcher"
+        android:hardwareAccelerated="true"
+        android:allowBackup="true"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+        <activity
+            android:name=".AndroidInputActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|screenLayout|uiMode|smallestScreenSize|density"
+            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Peliohjainten discovery -->
+            <meta-data
+                android:name="com.android.input.gamepad"
+                android:value="true" />
+        </activity>
+
+        <!-- Peliohjainten tuki (Android 8+) -->
+        <uses-library
+            android:name="com.android.input"
+            android:required="false" />
+    </application>
+</manifest>
+```
+
+---
+
+## 8. Yhteenveto — metodien vastaavuus JNI:ssä
+
+**Java → C++ JNI-nimet:**
+
+| Java-luokka | Java-metodi | C++-funktio |
+|-------------|-------------|-------------|
+| `AndroidInputBridge` | `nativeKeyEvent` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeKeyEvent` |
+| `AndroidInputBridge` | `nativeTouchEvent` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeTouchEvent` |
+| `AndroidInputBridge` | `nativeGenericMotion` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeGenericMotion` |
+| `AndroidInputBridge` | `nativeTextInput` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeTextInput` |
+| `AndroidInputBridge` | `nativeFocusChange` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeFocusChange` |
+| `AndroidInputBridge` | `nativePause` | `Java_fi_tommironty_STX_AndroidInputBridge_nativePause` |
+| `AndroidInputBridge` | `nativeResume` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeResume` |
+| `AndroidInputBridge` | `nativeDestroy` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeDestroy` |
+| `AndroidInputBridge` | `nativeResize` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeResize` |
+| `AndroidInputBridge` | `nativeMouseMotion` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeMouseMotion` |
+| `AndroidInputBridge` | `nativeMouseButton` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeMouseButton` |
+| `AndroidInputBridge` | `nativeGamepadAxis` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeGamepadAxis` |
+| `AndroidInputBridge` | `nativeGamepadButton` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeGamepadButton` |
+| `AndroidInputBridge` | `nativeGamepadConnected` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeGamepadConnected` |
+| `AndroidInputBridge` | `nativeGamepadDisconnected` | `Java_fi_tommironty_STX_AndroidInputBridge_nativeGamepadDisconnected` |
+| `AndroidInputActivity` | `nativeInit` | `Java_fi_tommironty_STX_AndroidInputActivity_nativeInit` |
+| `AndroidInputActivity` | `nativeResize` | `Java_fi_tommironty_STX_AndroidInputActivity_nativeResize` |
+| `AndroidInputActivity` | `nativeRender` | `Java_fi_tommironty_STX_AndroidInputActivity_nativeRender` |
+| `AndroidInputActivity` | `nativeShutdown` | `Java_fi_tommironty_STX_AndroidInputActivity_nativeShutdown` |
+
+**C++-puolella** `CInput.cpp` (aiemmasta vastauksesta) toteuttaa kaikki `nativeKeyEvent`...`nativeGamepadDisconnected` -funktiot. `AndroidInputActivity`:n `nativeInit`/`nativeResize`/`nativeRender`/`nativeShutdown` ovat pelin omassa natiivitoteutuksessa (esim. `Game.cpp`).
+
+---
+
+## 9. Tiedostorakenne
+
+```
+app/src/main/
+├── AndroidManifest.xml
+├── java/fi/tommironty/STX/
+│   ├── NativeLoader.java              ← natiivilataus
+│   ├── AndroidInputBridge.java        ← pää-JNI-silta
+│   ├── AndroidInputActivity.java      ← esimerkki-Activity
+│   ├── AndroidTextInputView.java      ← IME-tuki
+│   ├── AndroidInputHelper.java        ← elinkaaren apuluokka
+│   └── STXApplication.java            ← Application
+├── cpp/
+│   ├── CInput.cpp                     ← natiivi input
+│   ├── Game.cpp                       ← pelin natiivi
+│   ├── CMakeLists.txt
+│   └── STXinterfaces.h
+└── jniLibs/                           ← buildin jälkeen
+    ├── arm64-v8a/libstxinput.so
+    ├── armeabi-v7a/libstxinput.so
+    ├── x86/libstxinput.so
+    └── x86_64/libstxinput.so
+```
+
+**Build (Gradle → CMake):**
+
+```gradle
+// app/build.gradle
+android {
+    ...
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.18.1"
+        }
+    }
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++14 -fexceptions -frtti"
+                arguments "-DANDROID_STL=c++_static"
+            }
+        }
+        ndk {
+            abiFilters "arm64-v8a", "armeabi-v7a", "x86", "x86_64"
+        }
+    }
+}
+```
+
+**Keskeiset parannukset:**
+
+1. **`NativeLoader`** — idempotentti lataus, virheiden käsittely, ei kaadu jos kirjasto puuttuu
+2. **`WeakReference<Activity>`** — ei vuoda Activityä
+3. **Try/catch kaikissa JNI-kutsuissa** — natiivi poikkeus ei kaada Javaa
+4. **`AndroidInputHelper`** — `Application.ActivityLifecycleCallbacks` hoitaa elinkaaren automaattisesti
+5. **`STXApplication`** — keskittää alustuksen
+6. **Peliohjainten BroadcastReceiver** — `InputManager.ACTION_INPUT_DEVICE_ADDED/REMOVED`
+7. **Hiiren tila** — `lastMouseX/Y`, `mouseButtons` generic motionia varten
+8. **IME-kompositio** — `composing` + `committed` -puskurit, `finishComposingText`
+9. **Koon muutos** — `onResize` + `onConfigurationChanged`
+10. **Renderöintisilmukka** — erillinen `Thread`, ei blokkaa UI:ta

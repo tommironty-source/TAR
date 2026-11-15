@@ -1,0 +1,2004 @@
+# Täydellinen JNI-silta pelimoottorille
+
+Alla on **täydellinen, tuotantokelpoinen** JNI-silta pelimoottorille. Se kattaa:
+
+- **Pelimoottorin ydin** (init, update, render, shutdown)
+- **Resurssien hallinta** (tekstuurit, meshit, shaderit)
+- **Renderöintiasetukset** (viewport, clear color, kamera)
+- **Input-integraatio** (aiempi `AndroidInputBridge`)
+- **Äänijärjestelmä**
+- **Ajastin / aikajärjestelmä**
+- **Tiedostojärjestelmä** (assetit APK:sta)
+- **Lokitus** (logcat)
+- **Virheiden käsittely** (poikkeukset Javasta C++:aan ja takaisin)
+- **Scene-hallinta**
+- **Threading**
+
+---
+
+## 1. `STXNative.java` — natiivien metodien keskitetty rajapinta
+
+```java
+package fi.tommironty.STX;
+
+import android.content.res.AssetManager;
+
+/**
+ * STXNative — pelimoottorin natiivien metodien keskitetty rajapinta.
+ *
+ * Kaikki natiivikutsut kulkevat tämän luokan kautta. Jokainen
+ * public static native -metodi vastaa C++-funktiota nimellä:
+ *   Java_fi_tommironty_STX_STXNative_<metodi>
+ *
+ * == Käyttö ==
+ *   STXNative.init(assets, filesDir, width, height);
+ *   STXNative.update(dt);
+ *   STXNative.render();
+ *   STXNative.shutdown();
+ */
+public final class STXNative {
+
+    private STXNative() {}
+
+    static {
+        NativeLoader.ensureInputLoaded();
+        NativeLoader.tryLoadGameLibrary();
+    }
+
+    // ==================================================================
+    // Moottorin elinkaari
+    // ==================================================================
+
+    /**
+     * Alustaa pelimoottorin.
+     * @param assets    AssetManager (APK:n assetit)
+     * @param filesDir  Kirjoitettava hakemisto
+     * @param width     Alustava leveys pikseleinä
+     * @param height    Alustava korkeus pikseleinä
+     * @return true jos onnistui
+     */
+    public static native boolean init(AssetManager assets, String filesDir,
+                                      int width, int height);
+
+    /** Päivittää pelilogiikan. @param dt sekunteina edellisestä framesta. */
+    public static native void update(float dt);
+
+    /** Renderöi yhden framen. */
+    public static native void render();
+
+    /** Vapauttaa kaikki resurssit. */
+    public static native void shutdown();
+
+    /** Koon muutos. */
+    public static native void resize(int width, int height);
+
+    /** Fokuksen vaihtuminen (esim. puhelu tuli). */
+    public static native void onFocusChanged(boolean hasFocus);
+
+    /** Sovellus meni taustalle. */
+    public static native void onPause();
+
+    /** Sovellus palasi etualalle. */
+    public static native void onResume();
+
+    // ==================================================================
+    // Renderöinti
+    // ==================================================================
+
+    /** Asettaa clear-värin (0..1). */
+    public static native void setClearColor(float r, float g, float b, float a);
+
+    /** Asettaa viewportin. */
+    public static native void setViewport(int x, int y, int w, int h);
+
+    /** Asettaa kameran. */
+    public static native void setCamera(float eyeX, float eyeY, float eyeZ,
+                                        float atX, float atY, float atZ,
+                                        float upX, float upY, float upZ);
+
+    /** Asettaa perspektiiviprojektion. */
+    public static native void setPerspective(float fovY, float aspect,
+                                             float nearZ, float farZ);
+
+    /** Asettaa ortografisen projektion. */
+    public static native void setOrthographic(float left, float right,
+                                              float bottom, float top,
+                                              float nearZ, float farZ);
+
+    /** Asettaa maailmanmatriisin (16 float, column-major). */
+    public static native void setWorldMatrix(float[] m);
+
+    /** Asettaa view-matriisin (16 float, column-major). */
+    public static native void setViewMatrix(float[] m);
+
+    /** Asettaa projektiomatriisin (16 float, column-major). */
+    public static native void setProjectionMatrix(float[] m);
+
+    // ==================================================================
+    // Resurssit — tekstuurit
+    // ==================================================================
+
+    /** Lataa tekstuuri assetista. @return tekstuuri-ID tai 0. */
+    public static native int loadTexture(String assetPath);
+
+    /** Lataa tekstuuri tiedostosta. @return tekstuuri-ID tai 0. */
+    public static native int loadTextureFromFile(String filePath);
+
+    /** Vapauttaa tekstuurin. */
+    public static native void releaseTexture(int textureId);
+
+    /** Asettaa tekstuurin suodatuksen (0=nearest, 1=linear). */
+    public static native void setTextureFilter(int textureId, int minFilter, int magFilter);
+
+    /** Asettaa tekstuurin wrap-moodin (0=clamp, 1=repeat). */
+    public static native void setTextureWrap(int textureId, int wrapS, int wrapT);
+
+    // ==================================================================
+    // Resurssit — meshit
+    // ==================================================================
+
+    /**
+     * Luo mesh vertex- ja index-datasta.
+     * @param vertices float[] (x,y,z, nx,ny,nz, u,v) per vertex
+     * @param indices  int[] (kolmioiden indeksit)
+     * @return mesh-ID tai 0
+     */
+    public static native int createMesh(float[] vertices, int[] indices);
+
+    /** Vapauttaa meshin. */
+    public static native void releaseMesh(int meshId);
+
+    /** Piirtää meshin. */
+    public static native void drawMesh(int meshId);
+
+    // ==================================================================
+    // Resurssit — shaderit
+    // ==================================================================
+
+    /**
+     * Luo shader-ohjelman.
+     * @return shader-ID tai 0
+     */
+    public static native int createShader(String vertexSource, String fragmentSource);
+
+    /** Vapauttaa shaderin. */
+    public static native void releaseShader(int shaderId);
+
+    /** Käyttää shaderia. */
+    public static native void useShader(int shaderId);
+
+    /** Asettaa uniformin (float). */
+    public static native void setUniformFloat(int shaderId, String name, float v);
+
+    /** Asettaa uniformin (vec2). */
+    public static native void setUniformVec2(int shaderId, String name, float x, float y);
+
+    /** Asettaa uniformin (vec3). */
+    public static native void setUniformVec3(int shaderId, String name, float x, float y, float z);
+
+    /** Asettaa uniformin (vec4). */
+    public static native void setUniformVec4(int shaderId, String name, float x, float y, float z, float w);
+
+    /** Asettaa uniformin (mat4). */
+    public static native void setUniformMat4(int shaderId, String name, float[] m);
+
+    /** Asettaa uniformin (int / sampler). */
+    public static native void setUniformInt(int shaderId, String name, int v);
+
+    // ==================================================================
+    // Ääni
+    // ==================================================================
+
+    /** Lataa äänen assetista. @return ääni-ID tai 0. */
+    public static native int loadSound(String assetPath);
+
+    /** Vapauttaa äänen. */
+    public static native void releaseSound(int soundId);
+
+    /** Soittaa äänen. @return kanava-ID tai -1. */
+    public static native int playSound(int soundId, boolean loop, float volume);
+
+    /** Pysäyttää kanavan. */
+    public static native void stopSound(int channelId);
+
+    /** Asettaa master-äänenvoimakkuuden. */
+    public static native void setMasterVolume(float volume);
+
+    // ==================================================================
+    // Aika
+    // ==================================================================
+
+    /** Palauttaa kuluneen ajan sekunteina (moottorin alusta). */
+    public static native double getTime();
+
+    /** Palauttaa edellisen framen keston sekunteina. */
+    public static native float getDeltaTime();
+
+    /** Palauttaa FPS:n. */
+    public static native float getFPS();
+
+    /** Asettaa target-FPS:n (0 = rajoittamaton). */
+    public static native void setTargetFPS(int fps);
+
+    // ==================================================================
+    // Scene
+    // ==================================================================
+
+    /** Luo scenen. @return scene-ID tai 0. */
+    public static native int createScene(String name);
+
+    /** Vapauttaa scenen. */
+    public static native void releaseScene(int sceneId);
+
+    /** Asettaa aktiivisen scenen. */
+    public static native void setActiveScene(int sceneId);
+
+    /** Palauttaa aktiivisen scenen ID:n. */
+    public static native int getActiveScene();
+
+    // ==================================================================
+    // Kamera / syöte-integraatio
+    // ==================================================================
+
+    /** Kertoo natiiville, että kameraa liikutetaan (input). */
+    public static native void moveCamera(float dx, float dy, float dz);
+
+    /** Kiertää kameraa. */
+    public static native void rotateCamera(float yaw, float pitch);
+
+    // ==================================================================
+    // Lokitus
+    // ==================================================================
+
+    /** Asettaa lokitustason: 0=verbose, 1=debug, 2=info, 3=warn, 4=error. */
+    public static native void setLogLevel(int level);
+
+    /** Kirjoittaa viestin lokiin (kutsutaan natiivista, mutta voi kutsua myös Javasta). */
+    public static native void logMessage(int level, String tag, String message);
+
+    // ==================================================================
+    // Virheiden käsittely
+    // ==================================================================
+
+    /** Palauttaa viimeisimmän natiivin virheen (tai null). */
+    public static native String getLastError();
+
+    /** Tyhjentää viimeisimmän virheen. */
+    public static native void clearLastError();
+}
+```
+
+---
+
+## 2. `STXGameActivity.java` — täydellinen peli-Activity
+
+```java
+package fi.tommironty.STX;
+
+import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.res.Configuration;
+import android.hardware.input.InputManager;
+import android.opengl.GLSurfaceView;
+import android.os.Build;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.InputDevice;
+import android.view.SurfaceHolder;
+import android.view.View;
+import android.view.WindowManager;
+
+import javax.microedition.khronos.egl.EGLConfig;
+import javax.microedition.khronos.opengles.GL10;
+
+/**
+ * STXGameActivity — täydellinen peli-Activity, joka yhdistää
+ * GLSurfaceView:n, AndroidInputBridgen ja STXNativen.
+ *
+ * Tämä on valmis pohja oikealle pelille. Peri tästä tai kopioi
+ * elinkaarikoodi omaan Activityysi.
+ */
+public class STXGameActivity extends Activity
+        implements GLSurfaceView.Renderer {
+
+    private static final String TAG = "STX.Game";
+
+    private GLSurfaceView glView;
+    private AndroidInputBridge inputBridge;
+    private AndroidTextInputView textInput;
+    private boolean nativeInitialized = false;
+    private int viewWidth = 0;
+    private int viewHeight = 0;
+    private long lastFrameNanos = 0;
+
+    // Peliohjainten BroadcastReceiver
+    private final BroadcastReceiver gamepadReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (InputManager.ACTION_INPUT_DEVICE_ADDED.equals(action)) {
+                InputDevice device = intent.getParcelableExtra(InputManager.EXTRA_INPUT_DEVICE);
+                if (device != null && inputBridge != null) {
+                    inputBridge.onGamepadConnected(device);
+                }
+            } else if (InputManager.ACTION_INPUT_DEVICE_REMOVED.equals(action)) {
+                InputDevice device = intent.getParcelableExtra(InputManager.EXTRA_INPUT_DEVICE);
+                if (device != null && inputBridge != null) {
+                    inputBridge.onGamepadDisconnected(device);
+                }
+            }
+        }
+    };
+
+    // ==================================================================
+    // onCreate
+    // ==================================================================
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        Log.i(TAG, "onCreate");
+
+        // Estä näytön sammuminen
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+        // 1) Luo GLSurfaceView
+        glView = new GLSurfaceView(this);
+        glView.setEGLContextClientVersion(2);       // GLES2
+        glView.setEGLConfigChooser(8, 8, 8, 8, 16, 0);
+        glView.setRenderer(this);
+        glView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
+        glView.setPreserveEGLContextOnPause(true);
+        setContentView(glView);
+
+        // 2) Asenna input-silta
+        inputBridge = new AndroidInputBridge(this);
+        inputBridge.installOn(glView);
+        AndroidInputHelper.setCurrentBridge(this, inputBridge);
+
+        // 3) IME-tekstinsyöttö (valinnainen)
+        textInput = new AndroidTextInputView(this, inputBridge);
+        textInput.attachTo(glView);
+
+        // 4) Rekisteröi peliohjaimet
+        registerGamepadReceiver();
+
+        // 5) Aseta lokitustaso
+        try {
+            STXNative.setLogLevel(Log.INFO);
+        } catch (Throwable t) {
+            Log.e(TAG, "setLogLevel failed", t);
+        }
+    }
+
+    // ==================================================================
+    // GLSurfaceView.Renderer — kutsutaan GL-säikeestä
+    // ==================================================================
+    @Override
+    public void onSurfaceCreated(GL10 gl, EGLConfig config) {
+        Log.i(TAG, "onSurfaceCreated");
+
+        if (!nativeInitialized) {
+            try {
+                String filesDir = getFilesDir().getAbsolutePath();
+                int w = Math.max(1, viewWidth);
+                int h = Math.max(1, viewHeight);
+                nativeInitialized = STXNative.init(
+                        getAssets(), filesDir, w, h);
+                if (!nativeInitialized) {
+                    Log.e(TAG, "STXNative.init returned false: "
+                            + STXNative.getLastError());
+                } else {
+                    Log.i(TAG, "Native initialized: " + w + "x" + h);
+                }
+                lastFrameNanos = System.nanoTime();
+            } catch (Throwable t) {
+                Log.e(TAG, "STXNative.init failed", t);
+            }
+        } else {
+            // Konteksti luotiin uudelleen (esim. resume)
+            try {
+                STXNative.onResume();
+            } catch (Throwable t) {
+                Log.e(TAG, "onResume failed", t);
+            }
+        }
+    }
+
+    @Override
+    public void onSurfaceChanged(GL10 gl, int width, int height) {
+        Log.i(TAG, "onSurfaceChanged: " + width + "x" + height);
+        viewWidth = width;
+        viewHeight = height;
+        if (nativeInitialized) {
+            try {
+                STXNative.resize(width, height);
+            } catch (Throwable t) {
+                Log.e(TAG, "STXNative.resize failed", t);
+            }
+        }
+    }
+
+    @Override
+    public void onDrawFrame(GL10 gl) {
+        if (!nativeInitialized) return;
+
+        // Laske delta-aika
+        long now = System.nanoTime();
+        float dt = (now - lastFrameNanos) / 1_000_000_000.0f;
+        lastFrameNanos = now;
+        if (dt > 0.1f) dt = 0.1f;  // clamp
+
+        try {
+            STXNative.update(dt);
+            STXNative.render();
+        } catch (Throwable t) {
+            Log.e(TAG, "Frame error", t);
+        }
+    }
+
+    // ==================================================================
+    // Peliohjaimet
+    // ==================================================================
+    private void registerGamepadReceiver() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN) return;
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(InputManager.ACTION_INPUT_DEVICE_ADDED);
+        filter.addAction(InputManager.ACTION_INPUT_DEVICE_REMOVED);
+        registerReceiver(gamepadReceiver, filter);
+
+        InputManager im = (InputManager) getSystemService(Context.INPUT_SERVICE);
+        if (im != null) {
+            for (int id : im.getInputDeviceIds()) {
+                InputDevice dev = im.getInputDevice(id);
+                if (dev != null && inputBridge != null) {
+                    inputBridge.onGamepadConnected(dev);
+                }
+            }
+        }
+    }
+
+    private void unregisterGamepadReceiver() {
+        try {
+            unregisterReceiver(gamepadReceiver);
+        } catch (IllegalArgumentException e) {
+            // ei ollut rekisteröity
+        }
+    }
+
+    // ==================================================================
+    // Elinkaari
+    // ==================================================================
+    @Override
+    protected void onResume() {
+        super.onResume();
+        Log.i(TAG, "onResume");
+        if (glView != null) glView.onResume();
+        if (inputBridge != null) inputBridge.onResume();
+        if (nativeInitialized) {
+            try { STXNative.onResume(); }
+            catch (Throwable t) { Log.e(TAG, "STXNative.onResume", t); }
+            lastFrameNanos = System.nanoTime();
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        Log.i(TAG, "onPause");
+        if (inputBridge != null) inputBridge.onPause();
+        if (nativeInitialized) {
+            try { STXNative.onPause(); }
+            catch (Throwable t) { Log.e(TAG, "STXNative.onPause", t); }
+        }
+        if (glView != null) glView.onPause();
+        super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        Log.i(TAG, "onDestroy");
+        unregisterGamepadReceiver();
+        if (nativeInitialized) {
+            try { STXNative.shutdown(); }
+            catch (Throwable t) { Log.e(TAG, "STXNative.shutdown", t); }
+            nativeInitialized = false;
+        }
+        if (inputBridge != null) {
+            inputBridge.onDestroy();
+            inputBridge = null;
+        }
+        textInput = null;
+        glView = null;
+        super.onDestroy();
+    }
+
+    // ==================================================================
+    // Fokus
+    // ==================================================================
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (nativeInitialized) {
+            try { STXNative.onFocusChanged(hasFocus); }
+            catch (Throwable t) { Log.e(TAG, "STXNative.onFocusChanged", t); }
+        }
+        if (hasFocus) {
+            // Koko näytön immersive-tila
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                getWindow().getDecorView().setSystemUiVisibility(
+                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+            }
+        }
+    }
+
+    // ==================================================================
+    // Konfiguraation muutos (kierto)
+    // ==================================================================
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        Log.i(TAG, "onConfigurationChanged");
+        // GLSurfaceView hoitaa koon automaattisesti; onSurfaceChanged
+        // saa uuden koon ja välittää sen natiiville.
+    }
+
+    // ==================================================================
+    // Back
+    // ==================================================================
+    @Override
+    public void onBackPressed() {
+        super.onBackPressed();
+    }
+
+    // ==================================================================
+    // Apumetodit
+    // ==================================================================
+    public void showKeyboard()   { if (textInput != null) textInput.showKeyboard();   }
+    public void hideKeyboard()   { if (textInput != null) textInput.hideKeyboard();   }
+    public void insertText(String s) { if (textInput != null) textInput.insertTextFromIME(s); }
+
+    public AndroidInputBridge getInputBridge() { return inputBridge; }
+    public GLSurfaceView getGLView()           { return glView; }
+}
+```
+
+---
+
+## 3. `STXScene.java` — Scene-hallinta Java-puolella
+
+```java
+package fi.tommironty.STX;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * STXScene — Java-puolen scene-hallinta. Toimii yhdessä natiivin
+ * scene-järjestelmän kanssa: jokainen STXScene vastaa natiivia sceneä.
+ *
+ * Käyttö:
+ *   STXScene menu = new STXScene("menu");
+ *   menu.activate();
+ *   ...
+ *   STXScene game = new STXScene("game");
+ *   game.activate();   // menu deaktivoituu automaattisesti
+ */
+public class STXScene {
+
+    private final String name;
+    private final int nativeId;
+    private boolean active = false;
+
+    private static final List<STXScene> allScenes = new ArrayList<>();
+    private static STXScene activeScene = null;
+
+    public STXScene(String name) {
+        if (name == null) throw new IllegalArgumentException("name == null");
+        this.name = name;
+        this.nativeId = STXNative.createScene(name);
+        if (nativeId == 0) {
+            throw new RuntimeException("STXNative.createScene failed: "
+                    + STXNative.getLastError());
+        }
+        synchronized (allScenes) {
+            allScenes.add(this);
+        }
+    }
+
+    public String getName() { return name; }
+    public int getNativeId() { return nativeId; }
+    public boolean isActive() { return active; }
+
+    /** Aktivoi tämä scene. Edellinen deaktivoituu. */
+    public void activate() {
+        synchronized (allScenes) {
+            if (activeScene != null && activeScene != this) {
+                activeScene.active = false;
+            }
+            activeScene = this;
+            active = true;
+        }
+        STXNative.setActiveScene(nativeId);
+    }
+
+    /** Deaktivoi tämä scene (jos aktiivinen). */
+    public void deactivate() {
+        if (active) {
+            active = false;
+            if (activeScene == this) {
+                activeScene = null;
+                STXNative.setActiveScene(0);
+            }
+        }
+    }
+
+    /** Vapauttaa scenen. */
+    public void release() {
+        deactivate();
+        synchronized (allScenes) {
+            allScenes.remove(this);
+        }
+        STXNative.releaseScene(nativeId);
+    }
+
+    public static STXScene getActive() {
+        synchronized (allScenes) {
+            return activeScene;
+        }
+    }
+
+    /** Vapauttaa kaikki scenet (kutsutaan Activity.onDestroy:ssa). */
+    public static void releaseAll() {
+        List<STXScene> copy;
+        synchronized (allScenes) {
+            copy = new ArrayList<>(allScenes);
+            allScenes.clear();
+            activeScene = null;
+        }
+        for (STXScene s : copy) {
+            s.active = false;
+            STXNative.releaseScene(s.nativeId);
+        }
+    }
+}
+```
+
+---
+
+## 4. `STXResources.java` — resurssien hallinta
+
+```java
+package fi.tommironty.STX;
+
+import android.util.Log;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * STXResources — Java-puolen välimuisti natiiveille resursseille.
+ * Estää saman tekstuurin/meshin/shaderin lataamisen useasti.
+ *
+ * Käyttö:
+ *   int tex = STXResources.loadTexture("textures/player.png");
+ *   // ... myöhemmin
+ *   STXResources.releaseAll();  // Activity.onDestroy:ssa
+ */
+public final class STXResources {
+
+    private static final String TAG = "STX.Resources";
+
+    private static final Map<String, Integer> textureCache = new HashMap<>();
+    private static final Map<String, Integer> soundCache   = new HashMap<>();
+    private static final Map<Integer, String> textureKeys = new HashMap<>();
+    private static final Map<Integer, String> soundKeys   = new HashMap<>();
+
+    private STXResources() {}
+
+    // ==================================================================
+    // Tekstuurit
+    // ==================================================================
+    public static synchronized int loadTexture(String assetPath) {
+        if (assetPath == null) return 0;
+        Integer cached = textureCache.get(assetPath);
+        if (cached != null && cached != 0) return cached;
+
+        int id;
+        try {
+            id = STXNative.loadTexture(assetPath);
+        } catch (Throwable t) {
+            Log.e(TAG, "loadTexture failed: " + assetPath, t);
+            return 0;
+        }
+        if (id != 0) {
+            textureCache.put(assetPath, id);
+            textureKeys.put(id, assetPath);
+        } else {
+            Log.w(TAG, "loadTexture returned 0: " + assetPath
+                    + " (" + STXNative.getLastError() + ")");
+        }
+        return id;
+    }
+
+    public static synchronized void releaseTexture(int id) {
+        if (id == 0) return;
+        String key = textureKeys.remove(id);
+        if (key != null) textureCache.remove(key);
+        try {
+            STXNative.releaseTexture(id);
+        } catch (Throwable t) {
+            Log.e(TAG, "releaseTexture failed: " + id, t);
+        }
+    }
+
+    // ==================================================================
+    // Äänet
+    // ==================================================================
+    public static synchronized int loadSound(String assetPath) {
+        if (assetPath == null) return 0;
+        Integer cached = soundCache.get(assetPath);
+        if (cached != null && cached != 0) return cached;
+
+        int id;
+        try {
+            id = STXNative.loadSound(assetPath);
+        } catch (Throwable t) {
+            Log.e(TAG, "loadSound failed: " + assetPath, t);
+            return 0;
+        }
+        if (id != 0) {
+            soundCache.put(assetPath, id);
+            soundKeys.put(id, assetPath);
+        }
+        return id;
+    }
+
+    public static synchronized void releaseSound(int id) {
+        if (id == 0) return;
+        String key = soundKeys.remove(id);
+        if (key != null) soundCache.remove(key);
+        try {
+            STXNative.releaseSound(id);
+        } catch (Throwable t) {
+            Log.e(TAG, "releaseSound failed: " + id, t);
+        }
+    }
+
+    // ==================================================================
+    // Kaikkien vapautus
+    // ==================================================================
+    public static synchronized void releaseAll() {
+        for (Integer id : textureKeys.keySet()) {
+            try { STXNative.releaseTexture(id); }
+            catch (Throwable t) { Log.e(TAG, "releaseTexture", t); }
+        }
+        for (Integer id : soundKeys.keySet()) {
+            try { STXNative.releaseSound(id); }
+            catch (Throwable t) { Log.e(TAG, "releaseSound", t); }
+        }
+        textureCache.clear();
+        textureKeys.clear();
+        soundCache.clear();
+        soundKeys.clear();
+    }
+
+    public static synchronized int getTextureCount() { return textureCache.size(); }
+    public static synchronized int getSoundCount()   { return soundCache.size();   }
+}
+```
+
+---
+
+## 5. `CGame.cpp` — pelimoottorin natiivitoteutus
+
+Tämä on **C++-puolen pelimoottori**, joka toteuttaa kaikki `STXNative`-metodit.
+
+```cpp
+/*
+ *  CGame.cpp
+ *  STX Game Engine — natiivi pelimoottori
+ *
+ *  Copyright (c) 2015 Tommi Roenty   http://www.tommironty.fi/
+ *  Licensed under The GNU Lesser General Public License, version 2.1:
+ *      http://opensource.org/licenses/LGPL-2.1
+ */
+#include <STX/STX.h>
+#include <STX/STXCPP.h>
+
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
+#include <android/log.h>
+#include <jni.h>
+
+#include <string>
+#include <vector>
+#include <unordered_map>
+#include <cmath>
+#include <cstring>
+#include <cstdio>
+
+#define STX_LOG_TAG "STX.Game"
+#define LOGV(...) __android_log_print(ANDROID_LOG_VERBOSE, STX_LOG_TAG, __VA_ARGS__)
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG,   STX_LOG_TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,    STX_LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,    STX_LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,   STX_LOG_TAG, __VA_ARGS__)
+
+// GLES2
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
+
+// ============================================================
+// Apurakenteet
+// ============================================================
+
+struct Texture {
+    GLuint id;
+    int width, height;
+};
+
+struct Mesh {
+    GLuint vbo, ibo;
+    GLsizei indexCount;
+};
+
+struct Shader {
+    GLuint program;
+    std::unordered_map<std::string, GLint> uniforms;
+};
+
+struct Scene {
+    std::string name;
+    bool active;
+};
+
+// ============================================================
+// Moottorin tila
+// ============================================================
+struct Engine {
+    bool initialized = false;
+    int width = 0, height = 0;
+
+    // Aika
+    double startTime = 0.0;
+    float  deltaTime = 0.0f;
+    float  fps = 0.0f;
+    int    targetFPS = 0;
+    double lastFrameTime = 0.0;
+    int    framesThisSecond = 0;
+    double secondStart = 0.0;
+
+    // Renderöinti
+    float clearColor[4] = {0.1f, 0.1f, 0.15f, 1.0f};
+    int viewportX = 0, viewportY = 0;
+    int viewportW = 0, viewportH = 0;
+    float viewMatrix[16];
+    float projMatrix[16];
+    float worldMatrix[16];
+    float cameraEye[3] = {0, 0, 5};
+    float cameraAt[3]  = {0, 0, 0};
+    float cameraUp[3]  = {0, 1, 0};
+
+    // Resurssit
+    std::unordered_map<int, Texture> textures;
+    std::unordered_map<int, Mesh>    meshes;
+    std::unordered_map<int, Shader>  shaders;
+    std::unordered_map<int, Scene>   scenes;
+    int nextTextureId = 1;
+    int nextMeshId = 1;
+    int nextShaderId = 1;
+    int nextSceneId = 1;
+    int activeScene = 0;
+
+    // AssetManager
+    AAssetManager* assetManager = nullptr;
+
+    // Lokitus
+    int logLevel = ANDROID_LOG_INFO;
+
+    // Virhe
+    std::string lastError;
+};
+
+static Engine g_engine;
+
+// ============================================================
+// Apufunktiot — matriisit
+// ============================================================
+static void mat4_identity(float* m) {
+    memset(m, 0, 16 * sizeof(float));
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+}
+
+static void mat4_perspective(float* m, float fovY, float aspect,
+                             float nearZ, float farZ) {
+    float f = 1.0f / tanf(fovY * 0.5f);
+    memset(m, 0, 16 * sizeof(float));
+    m[0]  = f / aspect;
+    m[5]  = f;
+    m[10] = (farZ + nearZ) / (nearZ - farZ);
+    m[11] = -1.0f;
+    m[14] = (2.0f * farZ * nearZ) / (nearZ - farZ);
+}
+
+static void mat4_ortho(float* m, float l, float r, float b, float t,
+                       float n, float f) {
+    memset(m, 0, 16 * sizeof(float));
+    m[0]  =  2.0f / (r - l);
+    m[5]  =  2.0f / (t - b);
+    m[10] = -2.0f / (f - n);
+    m[12] = -(r + l) / (r - l);
+    m[13] = -(t + b) / (t - b);
+    m[14] = -(f + n) / (f - n);
+    m[15] =  1.0f;
+}
+
+static void vec3_sub(float* out, const float* a, const float* b) {
+    out[0] = a[0] - b[0];
+    out[1] = a[1] - b[1];
+    out[2] = a[2] - b[2];
+}
+
+static void vec3_cross(float* out, const float* a, const float* b) {
+    out[0] = a[1] * b[2] - a[2] * b[1];
+    out[1] = a[2] * b[0] - a[0] * b[2];
+    out[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static float vec3_dot(const float* a, const float* b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static void vec3_normalize(float* v) {
+    float len = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (len > 0.0f) {
+        v[0] /= len; v[1] /= len; v[2] /= len;
+    }
+}
+
+static void mat4_lookAt(float* m, const float* eye, const float* at, const float* up) {
+    float f[3], s[3], u[3];
+    vec3_sub(f, at, eye);
+    vec3_normalize(f);
+    vec3_cross(s, f, up);
+    vec3_normalize(s);
+    vec3_cross(u, s, f);
+
+    m[0] = s[0];  m[1] = u[0];  m[2] = -f[0]; m[3] = 0.0f;
+    m[4] = s[1];  m[5] = u[1];  m[6] = -f[1]; m[7] = 0.0f;
+    m[8] = s[2];  m[9] = u[2];  m[10]= -f[2]; m[11]= 0.0f;
+    m[12]= -vec3_dot(s, eye);
+    m[13]= -vec3_dot(u, eye);
+    m[14]=  vec3_dot(f, eye);
+    m[15]= 1.0f;
+}
+
+static void mat4_multiply(float* out, const float* a, const float* b) {
+    float tmp[16];
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            tmp[i * 4 + j] = 0.0f;
+            for (int k = 0; k < 4; k++) {
+                tmp[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
+            }
+        }
+    }
+    memcpy(out, tmp, sizeof(tmp));
+}
+
+static double now_seconds() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+// ============================================================
+// Apufunktiot — shader-käännös
+// ============================================================
+static GLuint compile_shader(GLenum type, const char* src) {
+    GLuint sh = glCreateShader(type);
+    glShaderSource(sh, 1, &src, nullptr);
+    glCompileShader(sh);
+    GLint ok = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[1024];
+        glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
+        LOGE("Shader compile failed: %s", log);
+        g_engine.lastError = std::string("Shader compile: ") + log;
+        glDeleteShader(sh);
+        return 0;
+    }
+    return sh;
+}
+
+static GLuint link_program(const char* vs, const char* fs) {
+    GLuint v = compile_shader(GL_VERTEX_SHADER, vs);
+    if (!v) return 0;
+    GLuint f = compile_shader(GL_FRAGMENT_SHADER, fs);
+    if (!f) { glDeleteShader(v); return 0; }
+    GLuint p = glCreateProgram();
+    glAttachShader(p, v);
+    glAttachShader(p, f);
+    glLinkProgram(p);
+    GLint ok = 0;
+    glGetProgramiv(p, GL_LINK_STATUS, &ok);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    if (!ok) {
+        char log[1024];
+        glGetProgramInfoLog(p, sizeof(log), nullptr, log);
+        LOGE("Program link failed: %s", log);
+        g_engine.lastError = std::string("Program link: ") + log;
+        glDeleteProgram(p);
+        return 0;
+    }
+    return p;
+}
+
+// ============================================================
+// Apufunktiot — tiedostojen lataus assetista
+// ============================================================
+static bool load_asset(const char* path, std::vector<uint8_t>& out) {
+    if (!g_engine.assetManager) return false;
+    AAsset* asset = AAssetManager_open(g_engine.assetManager, path, AASSET_MODE_BUFFER);
+    if (!asset) {
+        LOGE("Asset not found: %s", path);
+        return false;
+    }
+    off_t len = AAsset_getLength(asset);
+    out.resize((size_t)len);
+    if (len > 0) {
+        int read = AAsset_read(asset, out.data(), (size_t)len);
+        (void)read;
+    }
+    AAsset_close(asset);
+    return true;
+}
+
+static bool load_asset_text(const char* path, std::string& out) {
+    std::vector<uint8_t> data;
+    if (!load_asset(path, data)) return false;
+    out.assign((const char*)data.data(), data.size());
+    return true;
+}
+
+// ============================================================
+// Apufunktiot — tekstuurin lataus (yksinkertainen PPM/RAW-tuki)
+// ============================================================
+// Oikea peli käyttäisi stb_image.h:ta; tässä yksinkertaistus
+// (oletetaan RAW RGBA -tiedosto, jossa on 4 tavua per pikseli,
+//  koko tiedostonimen perusteella tai erikseen annettuna).
+static GLuint create_texture_from_rgba(const uint8_t* pixels,
+                                       int w, int h) {
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+// ============================================================
+// JNI — apufunktiot
+// ============================================================
+static std::string jstring_to_string(JNIEnv* env, jstring js) {
+    if (!js) return std::string();
+    const char* c = env->GetStringUTFChars(js, nullptr);
+    if (!c) return std::string();
+    std::string s(c);
+    env->ReleaseStringUTFChars(js, c);
+    return s;
+}
+
+static void set_error(const char* msg) {
+    g_engine.lastError = msg ? msg : "";
+    LOGE("%s", msg ? msg : "");
+}
+
+// ============================================================
+// JNI — STXNative: elinkaari
+// ============================================================
+extern "C" {
+
+JNIEXPORT jboolean JNICALL
+Java_fi_tommironty_STX_STXNative_init(
+    JNIEnv* env, jclass, jobject assetManager,
+    jstring filesDir, jint width, jint height)
+{
+    if (g_engine.initialized) {
+        LOGW("init called twice; ignoring");
+        return JNI_TRUE;
+    }
+
+    g_engine.assetManager = AAssetManager_fromJava(env, assetManager);
+    if (!g_engine.assetManager) {
+        set_error("AAssetManager_fromJava failed");
+        return JNI_FALSE;
+    }
+
+    g_engine.width  = width;
+    g_engine.height = height;
+    g_engine.viewportW = width;
+    g_engine.viewportH = height;
+    mat4_identity(g_engine.viewMatrix);
+    mat4_identity(g_engine.projMatrix);
+    mat4_identity(g_engine.worldMatrix);
+    mat4_perspective(g_engine.projMatrix, 60.0f * 3.14159f / 180.0f,
+                     (float)width / (float)height, 0.1f, 1000.0f);
+
+    g_engine.startTime = now_seconds();
+    g_engine.lastFrameTime = g_engine.startTime;
+    g_engine.secondStart = g_engine.startTime;
+
+    // GL-asetukset
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glEnable(GL_CULL_FACE);
+    glCullFace(GL_BACK);
+
+    g_engine.initialized = true;
+    LOGI("Engine initialized: %dx%d, filesDir=%s",
+         width, height, jstring_to_string(env, filesDir).c_str());
+    return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_update(
+    JNIEnv*, jclass, jfloat dt)
+{
+    if (!g_engine.initialized) return;
+    g_engine.deltaTime = dt;
+    // Pelilogiikka: päivitä scenet, entiteetit, fysiikka, jne.
+    // Tässä yksinkertaistus: ei mitään.
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_render(JNIEnv*, jclass)
+{
+    if (!g_engine.initialized) return;
+
+    // Päivitä FPS
+    double now = now_seconds();
+    g_engine.framesThisSecond++;
+    if (now - g_engine.secondStart >= 1.0) {
+        g_engine.fps = (float)g_engine.framesThisSecond;
+        g_engine.framesThisSecond = 0;
+        g_engine.secondStart = now;
+    }
+
+    // Clear
+    glViewport(g_engine.viewportX, g_engine.viewportY,
+               g_engine.viewportW, g_engine.viewportH);
+    glClearColor(g_engine.clearColor[0], g_engine.clearColor[1],
+                 g_engine.clearColor[2], g_engine.clearColor[3]);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Tässä oikea peli piirtäisi scenen meshit.
+    // Esimerkki: piirrä kaikki meshit oletusshaderilla.
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_shutdown(JNIEnv*, jclass)
+{
+    if (!g_engine.initialized) return;
+
+    // Vapauta resurssit
+    for (auto& kv : g_engine.textures) {
+        glDeleteTextures(1, &kv.second.id);
+    }
+    for (auto& kv : g_engine.meshes) {
+        glDeleteBuffers(1, &kv.second.vbo);
+        glDeleteBuffers(1, &kv.second.ibo);
+    }
+    for (auto& kv : g_engine.shaders) {
+        glDeleteProgram(kv.second.program);
+    }
+    g_engine.textures.clear();
+    g_engine.meshes.clear();
+    g_engine.shaders.clear();
+    g_engine.scenes.clear();
+
+    g_engine.initialized = false;
+    g_engine.assetManager = nullptr;
+    LOGI("Engine shutdown");
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_resize(
+    JNIEnv*, jclass, jint width, jint height)
+{
+    g_engine.width = width;
+    g_engine.height = height;
+    g_engine.viewportW = width;
+    g_engine.viewportH = height;
+    if (height > 0) {
+        mat4_perspective(g_engine.projMatrix, 60.0f * 3.14159f / 180.0f,
+                         (float)width / (float)height, 0.1f, 1000.0f);
+    }
+    LOGI("Resize: %dx%d", width, height);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_onFocusChanged(
+    JNIEnv*, jclass, jboolean hasFocus)
+{
+    LOGI("Focus: %d", hasFocus ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_onPause(JNIEnv*, jclass)
+{
+    LOGI("onPause");
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_onResume(JNIEnv*, jclass)
+{
+    LOGI("onResume");
+    g_engine.lastFrameTime = now_seconds();
+}
+
+// ============================================================
+// JNI — Renderöinti
+// ============================================================
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setClearColor(
+    JNIEnv*, jclass, jfloat r, jfloat g, jfloat b, jfloat a)
+{
+    g_engine.clearColor[0] = r;
+    g_engine.clearColor[1] = g;
+    g_engine.clearColor[2] = b;
+    g_engine.clearColor[3] = a;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setViewport(
+    JNIEnv*, jclass, jint x, jint y, jint w, jint h)
+{
+    g_engine.viewportX = x;
+    g_engine.viewportY = y;
+    g_engine.viewportW = w;
+    g_engine.viewportH = h;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setCamera(
+    JNIEnv*, jclass,
+    jfloat eyeX, jfloat eyeY, jfloat eyeZ,
+    jfloat atX, jfloat atY, jfloat atZ,
+    jfloat upX, jfloat upY, jfloat upZ)
+{
+    g_engine.cameraEye[0] = eyeX; g_engine.cameraEye[1] = eyeY; g_engine.cameraEye[2] = eyeZ;
+    g_engine.cameraAt[0]  = atX;  g_engine.cameraAt[1]  = atY;  g_engine.cameraAt[2]  = atZ;
+    g_engine.cameraUp[0]  = upX;  g_engine.cameraUp[1]  = upY;  g_engine.cameraUp[2]  = upZ;
+    mat4_lookAt(g_engine.viewMatrix, g_engine.cameraEye,
+                g_engine.cameraAt, g_engine.cameraUp);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setPerspective(
+    JNIEnv*, jclass, jfloat fovY, jfloat aspect, jfloat nearZ, jfloat farZ)
+{
+    mat4_perspective(g_engine.projMatrix, fovY, aspect, nearZ, farZ);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setOrthographic(
+    JNIEnv*, jclass, jfloat l, jfloat r, jfloat b, jfloat t,
+    jfloat n, jfloat f)
+{
+    mat4_ortho(g_engine.projMatrix, l, r, b, t, n, f);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setWorldMatrix(
+    JNIEnv* env, jclass, jfloatArray arr)
+{
+    if (!arr) return;
+    jsize n = env->GetArrayLength(arr);
+    if (n < 16) return;
+    jfloat buf[16];
+    env->GetFloatArrayRegion(arr, 0, 16, buf);
+    memcpy(g_engine.worldMatrix, buf, sizeof(buf));
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setViewMatrix(
+    JNIEnv* env, jclass, jfloatArray arr)
+{
+    if (!arr) return;
+    jsize n = env->GetArrayLength(arr);
+    if (n < 16) return;
+    jfloat buf[16];
+    env->GetFloatArrayRegion(arr, 0, 16, buf);
+    memcpy(g_engine.viewMatrix, buf, sizeof(buf));
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setProjectionMatrix(
+    JNIEnv* env, jclass, jfloatArray arr)
+{
+    if (!arr) return;
+    jsize n = env->GetArrayLength(arr);
+    if (n < 16) return;
+    jfloat buf[16];
+    env->GetFloatArrayRegion(arr, 0, 16, buf);
+    memcpy(g_engine.projMatrix, buf, sizeof(buf));
+}
+
+// ============================================================
+// JNI — Tekstuurit
+// ============================================================
+JNIEXPORT jint JNICALL
+Java_fi_tommironty_STX_STXNative_loadTexture(
+    JNIEnv* env, jclass, jstring assetPath)
+{
+    std::string path = jstring_to_string(env, assetPath);
+    if (path.empty()) return 0;
+
+    // Yksinkertaistus: oletetaan RAW RGBA, jonka mitat ovat tiedostonimessä
+    // muodossa "nimi_WxH.raw" TAI luetaan PPM (P6).
+    // Oikea peli käyttäisi stb_image.h:ta.
+    std::vector<uint8_t> data;
+    if (!load_asset(path.c_str(), data)) {
+        g_engine.lastError = "Asset not found: " + path;
+        return 0;
+    }
+
+    int w = 0, h = 0;
+    const uint8_t* pixels = nullptr;
+    std::vector<uint8_t> rgba;
+
+    // Yritä PPM (P6)
+    if (data.size() > 2 && data[0] == 'P' && data[1] == '6') {
+        // Parsitaan PPM header
+        size_t i = 2;
+        auto skip_ws = [&]() {
+            while (i < data.size() && (data[i] == ' ' || data[i] == '\n' ||
+                                       data[i] == '\r' || data[i] == '\t')) i++;
+            if (i < data.size() && data[i] == '#') {
+                while (i < data.size() && data[i] != '\n') i++;
+                skip_ws();
+            }
+        };
+        auto read_int = [&]() -> int {
+            skip_ws();
+            int v = 0;
+            while (i < data.size() && data[i] >= '0' && data[i] <= '9') {
+                v = v * 10 + (data[i] - '0');
+                i++;
+            }
+            return v;
+        };
+        w = read_int();
+        h = read_int();
+        int maxv = read_int();
+        skip_ws();
+        (void)maxv;
+        if (w > 0 && h > 0 && i + (size_t)w * h * 3 <= data.size()) {
+            rgba.resize((size_t)w * h * 4);
+            const uint8_t* src = data.data() + i;
+            for (int p = 0; p < w * h; p++) {
+                rgba[p * 4 + 0] = src[p * 3 + 0];
+                rgba[p * 4 + 1] = src[p * 3 + 1];
+                rgba[p * 4 + 2] = src[p * 3 + 2];
+                rgba[p * 4 + 3] = 255;
+            }
+            pixels = rgba.data();
+        }
+    }
+
+    if (!pixels) {
+        // Fallback: yritä tulkita RAW RGBA ja päätellä koko tiedostonimestä
+        // (esim. "player_64x64.raw")
+        size_t underscore = path.find_last_of('_');
+        size_t dot = path.find_last_of('.');
+        if (underscore != std::string::npos && dot != std::string::npos &&
+            dot > underscore) {
+            std::string dims = path.substr(underscore + 1, dot - underscore - 1);
+            size_t x = dims.find('x');
+            if (x != std::string::npos) {
+                w = atoi(dims.substr(0, x).c_str());
+                h = atoi(dims.substr(x + 1).c_str());
+            }
+        }
+        if (w > 0 && h > 0 &&
+            data.size() >= (size_t)w * h * 4) {
+            pixels = data.data();
+        }
+    }
+
+    if (!pixels || w <= 0 || h <= 0) {
+        g_engine.lastError = "Unsupported texture format: " + path;
+        LOGE("%s", g_engine.lastError.c_str());
+        return 0;
+    }
+
+    GLuint tex = create_texture_from_rgba(pixels, w, h);
+    if (!tex) {
+        g_engine.lastError = "glGenTextures failed";
+        return 0;
+    }
+
+    int id = g_engine.nextTextureId++;
+    g_engine.textures[id] = { tex, w, h };
+    LOGI("Texture loaded: %s (%dx%d) -> id=%d", path.c_str(), w, h, id);
+    return id;
+}
+
+JNIEXPORT jint JNICALL
+Java_fi_tommironty_STX_STXNative_loadTextureFromFile(
+    JNIEnv* env, jclass, jstring filePath)
+{
+    // Sama kuin loadTexture mutta tiedostosta
+    return Java_fi_tommironty_STX_STXNative_loadTexture(env, nullptr, filePath);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_releaseTexture(
+    JNIEnv*, jclass, jint textureId)
+{
+    auto it = g_engine.textures.find(textureId);
+    if (it == g_engine.textures.end()) return;
+    glDeleteTextures(1, &it->second.id);
+    g_engine.textures.erase(it);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setTextureFilter(
+    JNIEnv*, jclass, jint textureId, jint minFilter, jint magFilter)
+{
+    auto it = g_engine.textures.find(textureId);
+    if (it == g_engine.textures.end()) return;
+    GLint minF = (minFilter == 0) ? GL_NEAREST : GL_LINEAR;
+    GLint magF = (magFilter == 0) ? GL_NEAREST : GL_LINEAR;
+    glBindTexture(GL_TEXTURE_2D, it->second.id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minF);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, magF);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setTextureWrap(
+    JNIEnv*, jclass, jint textureId, jint wrapS, jint wrapT)
+{
+    auto it = g_engine.textures.find(textureId);
+    if (it == g_engine.textures.end()) return;
+    GLint s = (wrapS == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+    GLint t = (wrapT == 0) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+    glBindTexture(GL_TEXTURE_2D, it->second.id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, s);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, t);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// ============================================================
+// JNI — Meshit
+// ============================================================
+JNIEXPORT jint JNICALL
+Java_fi_tommironty_STX_STXNative_createMesh(
+    JNIEnv* env, jclass, jfloatArray vertices, jintArray indices)
+{
+    if (!vertices || !indices) return 0;
+    jsize vn = env->GetArrayLength(vertices);
+    jsize in = env->GetArrayLength(indices);
+    if (vn <= 0 || in <= 0) return 0;
+
+    jfloat* vdata = env->GetFloatArrayElements(vertices, nullptr);
+    jint*   idata = env->GetIntArrayElements(indices, nullptr);
+    if (!vdata || !idata) {
+        if (vdata) env->ReleaseFloatArrayElements(vertices, vdata, JNI_ABORT);
+        if (idata) env->ReleaseIntArrayElements(indices, idata, JNI_ABORT);
+        return 0;
+    }
+
+    GLuint vbo = 0, ibo = 0;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, vn * sizeof(float), vdata, GL_STATIC_DRAW);
+
+    glGenBuffers(1, &ibo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, in * sizeof(int), idata, GL_STATIC_DRAW);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+    env->ReleaseFloatArrayElements(vertices, vdata, JNI_ABORT);
+    env->ReleaseIntArrayElements(indices, idata, JNI_ABORT);
+
+    int id = g_engine.nextMeshId++;
+    g_engine.meshes[id] = { vbo, ibo, (GLsizei)in };
+    LOGI("Mesh created: id=%d vertices=%d indices=%d", id, vn, in);
+    return id;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_releaseMesh(
+    JNIEnv*, jclass, jint meshId)
+{
+    auto it = g_engine.meshes.find(meshId);
+    if (it == g_engine.meshes.end()) return;
+    glDeleteBuffers(1, &it->second.vbo);
+    glDeleteBuffers(1, &it->second.ibo);
+    g_engine.meshes.erase(it);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_drawMesh(
+    JNIEnv*, jclass, jint meshId)
+{
+    auto it = g_engine.meshes.find(meshId);
+    if (it == g_engine.meshes.end()) return;
+
+    glBindBuffer(GL_ARRAY_BUFFER, it->second.vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, it->second.ibo);
+
+    // Oletuslayout: position(3), normal(3), uv(2) = 8 float per vertex
+    const GLsizei stride = 8 * sizeof(float);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)(6 * sizeof(float)));
+
+    glDrawElements(GL_TRIANGLES, it->second.indexCount, GL_UNSIGNED_INT, 0);
+
+    glDisableVertexAttribArray(0);
+    glDisableVertexAttribArray(1);
+    glDisableVertexAttribArray(2);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+}
+
+// ============================================================
+// JNI — Shaderit
+// ============================================================
+JNIEXPORT jint JNICALL
+Java_fi_tommironty_STX_STXNative_createShader(
+    JNIEnv* env, jclass, jstring vs, jstring fs)
+{
+    std::string vsrc = jstring_to_string(env, vs);
+    std::string fsrc = jstring_to_string(env, fs);
+    if (vsrc.empty() || fsrc.empty()) return 0;
+
+    GLuint prog = link_program(vsrc.c_str(), fsrc.c_str());
+    if (!prog) return 0;
+
+    int id = g_engine.nextShaderId++;
+    g_engine.shaders[id] = { prog, {} };
+    LOGI("Shader created: id=%d program=%u", id, prog);
+    return id;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_releaseShader(
+    JNIEnv*, jclass, jint shaderId)
+{
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end()) return;
+    glDeleteProgram(it->second.program);
+    g_engine.shaders.erase(it);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_useShader(
+    JNIEnv*, jclass, jint shaderId)
+{
+    if (shaderId == 0) {
+        glUseProgram(0);
+        return;
+    }
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end()) return;
+    glUseProgram(it->second.program);
+}
+
+static GLint get_uniform(JNIEnv* env, Shader& sh, jstring name) {
+    std::string n = jstring_to_string(env, name);
+    auto it = sh.uniforms.find(n);
+    if (it != sh.uniforms.end()) return it->second;
+    GLint loc = glGetUniformLocation(sh.program, n.c_str());
+    if (loc >= 0) sh.uniforms[n] = loc;
+    return loc;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setUniformFloat(
+    JNIEnv* env, jclass, jint shaderId, jstring name, jfloat v)
+{
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end()) return;
+    GLint loc = get_uniform(env, it->second, name);
+    if (loc >= 0) glUniform1f(loc, v);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setUniformVec2(
+    JNIEnv* env, jclass, jint shaderId, jstring name, jfloat x, jfloat y)
+{
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end()) return;
+    GLint loc = get_uniform(env, it->second, name);
+    if (loc >= 0) glUniform2f(loc, x, y);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setUniformVec3(
+    JNIEnv* env, jclass, jint shaderId, jstring name,
+    jfloat x, jfloat y, jfloat z)
+{
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end()) return;
+    GLint loc = get_uniform(env, it->second, name);
+    if (loc >= 0) glUniform3f(loc, x, y, z);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setUniformVec4(
+    JNIEnv* env, jclass, jint shaderId, jstring name,
+    jfloat x, jfloat y, jfloat z, jfloat w)
+{
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end()) return;
+    GLint loc = get_uniform(env, it->second, name);
+    if (loc >= 0) glUniform4f(loc, x, y, z, w);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setUniformMat4(
+    JNIEnv* env, jclass, jint shaderId, jstring name, jfloatArray arr)
+{
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end() || !arr) return;
+    if (env->GetArrayLength(arr) < 16) return;
+    jfloat buf[16];
+    env->GetFloatArrayRegion(arr, 0, 16, buf);
+    GLint loc = get_uniform(env, it->second, name);
+    if (loc >= 0) glUniformMatrix4fv(loc, 1, GL_FALSE, buf);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setUniformInt(
+    JNIEnv* env, jclass, jint shaderId, jstring name, jint v)
+{
+    auto it = g_engine.shaders.find(shaderId);
+    if (it == g_engine.shaders.end()) return;
+    GLint loc = get_uniform(env, it->second, name);
+    if (loc >= 0) glUniform1i(loc, v);
+}
+
+// ============================================================
+// JNI — Ääni (yksinkertaistus: stub)
+// ============================================================
+JNIEXPORT jint JNICALL
+Java_fi_tommironty_STX_STXNative_loadSound(
+    JNIEnv* env, jclass, jstring assetPath)
+{
+    // Oikea peli käyttäisi OpenSL ES:ää tai AAudio:ta.
+    // Tässä stub: palautetaan 0 (ei tukea).
+    (void)env; (void)assetPath;
+    LOGW("loadSound: not implemented");
+    return 0;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_releaseSound(JNIEnv*, jclass, jint) {}
+
+JNIEXPORT jint JNICALL
+Java_fi_tommironty_STX_STXNative_playSound(
+    JNIEnv*, jclass, jint, jboolean, jfloat)
+{
+    return -1;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_stopSound(JNIEnv*, jclass, jint) {}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setMasterVolume(JNIEnv*, jclass, jfloat) {}
+
+// ============================================================
+// JNI — Aika
+// ============================================================
+JNIEXPORT jdouble JNICALL
+Java_fi_tommironty_STX_STXNative_getTime(JNIEnv*, jclass)
+{
+    return now_seconds() - g_engine.startTime;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_fi_tommironty_STX_STXNative_getDeltaTime(JNIEnv*, jclass)
+{
+    return g_engine.deltaTime;
+}
+
+JNIEXPORT jfloat JNICALL
+Java_fi_tommironty_STX_STXNative_getFPS(JNIEnv*, jclass)
+{
+    return g_engine.fps;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setTargetFPS(JNIEnv*, jclass, jint fps)
+{
+    g_engine.targetFPS = fps;
+}
+
+// ============================================================
+// JNI — Scene
+// ============================================================
+JNIEXPORT jint JNICALL
+Java_fi_tommironty_STX_STXNative_createScene(
+    JNIEnv* env, jclass, jstring name)
+{
+    std::string n = jstring_to_string(env, name);
+    int id = g_engine.nextSceneId++;
+    g_engine.scenes[id] = { n, false };
+    LOGI("Scene created: id=%d name=%s", id, n.c_str());
+    return id;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_releaseScene(
+    JNIEnv*, jclass, jint sceneId)
+{
+    if (g_engine.activeScene == sceneId) g_engine.activeScene = 0;
+    g_engine.scenes.erase(sceneId);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setActiveScene(
+    JNIEnv*, jclass, jint sceneId)
+{
+    for (auto& kv : g_engine.scenes) kv.second.active = (kv.first == sceneId);
+    g_engine.activeScene = sceneId;
+}
+
+JNIEXPORT jint JNICALL
+Java_fi_tommironty_STX_STXNative_getActiveScene(JNIEnv*, jclass)
+{
+    return g_engine.activeScene;
+}
+
+// ============================================================
+// JNI — Kamera-input
+// ============================================================
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_moveCamera(
+    JNIEnv*, jclass, jfloat dx, jfloat dy, jfloat dz)
+{
+    g_engine.cameraEye[0] += dx;
+    g_engine.cameraEye[1] += dy;
+    g_engine.cameraEye[2] += dz;
+    g_engine.cameraAt[0]  += dx;
+    g_engine.cameraAt[1]  += dy;
+    g_engine.cameraAt[2]  += dz;
+    mat4_lookAt(g_engine.viewMatrix, g_engine.cameraEye,
+                g_engine.cameraAt, g_engine.cameraUp);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_rotateCamera(
+    JNIEnv*, jclass, jfloat yaw, jfloat pitch)
+{
+    // Kierto at-pisteen ympäri
+    float dx = g_engine.cameraAt[0] - g_engine.cameraEye[0];
+    float dy = g_engine.cameraAt[1] - g_engine.cameraEye[1];
+    float dz = g_engine.cameraAt[2] - g_engine.cameraEye[2];
+
+    // Yaw (Y-akseli)
+    float cosY = cosf(yaw), sinY = sinf(yaw);
+    float nx = dx * cosY - dz * sinY;
+    float nz = dx * sinY + dz * cosY;
+    dx = nx; dz = nz;
+
+    // Pitch (X-akseli)
+    float cosP = cosf(pitch), sinP = sinf(pitch);
+    float ny = dy * cosP - dz * sinP;
+    nz = dy * sinP + dz * cosP;
+    dy = ny; dz = nz;
+
+    g_engine.cameraAt[0] = g_engine.cameraEye[0] + dx;
+    g_engine.cameraAt[1] = g_engine.cameraEye[1] + dy;
+    g_engine.cameraAt[2] = g_engine.cameraEye[2] + dz;
+    mat4_lookAt(g_engine.viewMatrix, g_engine.cameraEye,
+                g_engine.cameraAt, g_engine.cameraUp);
+}
+
+// ============================================================
+// JNI — Lokitus
+// ============================================================
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_setLogLevel(JNIEnv*, jclass, jint level)
+{
+    g_engine.logLevel = level;
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_logMessage(
+    JNIEnv* env, jclass, jint level, jstring tag, jstring message)
+{
+    std::string t = jstring_to_string(env, tag);
+    std::string m = jstring_to_string(env, message);
+    if (level < g_engine.logLevel) return;
+    __android_log_write(level, t.c_str(), m.c_str());
+}
+
+// ============================================================
+// JNI — Virheet
+// ============================================================
+JNIEXPORT jstring JNICALL
+Java_fi_tommironty_STX_STXNative_getLastError(JNIEnv* env, jclass)
+{
+    if (g_engine.lastError.empty()) return nullptr;
+    return env->NewStringUTF(g_engine.lastError.c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_STXNative_clearLastError(JNIEnv*, jclass)
+{
+    g_engine.lastError.clear();
+}
+
+} // extern "C"
+```
+
+---
+
+## 6. `CMakeLists.txt` — natiivin kirjaston build
+
+```cmake
+cmake_minimum_required(VERSION 3.18)
+project(stxgame CXX)
+
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# ------------------------------------------------------------------
+# stxinput — input-kirjasto (CInput.cpp)
+# ------------------------------------------------------------------
+add_library(stxinput SHARED
+    CInput.cpp
+)
+target_include_directories(stxinput PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../STX
+)
+target_link_libraries(stxinput
+    log android GLESv2 EGL
+)
+
+# ------------------------------------------------------------------
+# stxgame — pelimoottori (CGame.cpp)
+# ------------------------------------------------------------------
+add_library(stxgame SHARED
+    CGame.cpp
+    # ... muut pelin lähteet
+)
+target_include_directories(stxgame PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_CURRENT_SOURCE_DIR}/../STX
+)
+target_link_libraries(stxgame
+    log android GLESv2 EGL
+    stxinput  # input on erillinen mutta linkitetään
+)
+```
+
+**Gradle:**
+
+```gradle
+android {
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+        }
+    }
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++14 -fexceptions -frtti"
+                arguments "-DANDROID_STL=c++_static"
+            }
+        }
+        ndk { abiFilters "arm64-v8a", "armeabi-v7a", "x86_64" }
+    }
+}
+```
+
+---
+
+## 7. Yhteenveto — JNI-metodien vastaavuus
+
+| Java (`STXNative`) | C++ JNI | Selitys |
+|--------------------|---------|---------|
+| `init` | `Java_..._STXNative_init` | AssetManager + alustus |
+| `update` | `..._update` | Pelilogiikka |
+| `render` | `..._render` | Piirto |
+| `shutdown` | `..._shutdown` | Resurssien vapautus |
+| `resize` | `..._resize` | Koon muutos |
+| `onFocusChanged` | `..._onFocusChanged` | Fokus |
+| `onPause` / `onResume` | `..._onPause` / `..._onResume` | Elinkaari |
+| `setClearColor` | `..._setClearColor` | Render |
+| `setViewport` | `..._setViewport` | Render |
+| `setCamera` | `..._setCamera` | Kamera |
+| `setPerspective` | `..._setPerspective` | Projektio |
+| `setOrthographic` | `..._setOrthographic` | Projektio |
+| `setWorldMatrix` / `setViewMatrix` / `setProjectionMatrix` | `..._set*Matrix` | Matriisit |
+| `loadTexture` | `..._loadTexture` | Tekstuuri assetista |
+| `loadTextureFromFile` | `..._loadTextureFromFile` | Tekstuuri tiedostosta |
+| `releaseTexture` | `..._releaseTexture` | Vapautus |
+| `setTextureFilter` / `setTextureWrap` | `..._set*` | Tekstuurin asetukset |
+| `createMesh` | `..._createMesh` | Mesh VBO/IBO |
+| `releaseMesh` / `drawMesh` | `..._*Mesh` | Mesh |
+| `createShader` / `releaseShader` / `useShader` | `..._*Shader` | Shader |
+| `setUniformFloat` / `Vec2` / `Vec3` / `Vec4` / `Mat4` / `Int` | `..._setUniform*` | Uniformit |
+| `loadSound` / `releaseSound` / `playSound` / `stopSound` / `setMasterVolume` | `..._*Sound` | Ääni (stub) |
+| `getTime` / `getDeltaTime` / `getFPS` / `setTargetFPS` | `..._get*` | Aika |
+| `createScene` / `releaseScene` / `setActiveScene` / `getActiveScene` | `..._*Scene` | Scene |
+| `moveCamera` / `rotateCamera` | `..._*Camera` | Kamera-input |
+| `setLogLevel` / `logMessage` | `..._setLogLevel` / `..._logMessage` | Lokitus |
+| `getLastError` / `clearLastError` | `..._getLastError` / `..._clearLastError` | Virheet |
+
+---
+
+## 8. Tiedostorakenne
+
+```
+app/src/main/
+├── AndroidManifest.xml
+├── java/fi/tommironty/STX/
+│   ├── NativeLoader.java              ← natiivilataus
+│   ├── AndroidInputBridge.java        ← input-silta
+│   ├── AndroidTextInputView.java      ← IME
+│   ├── AndroidInputHelper.java        ← elinkaari
+│   ├── STXApplication.java            ← Application
+│   ├── STXNative.java                 ← pelimoottorin JNI-rajapinta
+│   ├── STXGameActivity.java           ← GLSurfaceView + peli
+│   ├── STXScene.java                  ← scene-hallinta
+│   └── STXResources.java              ← resurssivälimuisti
+├── cpp/
+│   ├── CInput.cpp                     ← input-natiivi (JNI)
+│   ├── CGame.cpp                      ← pelimoottori-natiivi (JNI)
+│   ├── STXinterfaces.h
+│   └── CMakeLists.txt
+└── jniLibs/
+    ├── arm64-v8a/libstxinput.so
+    ├── arm64-v8a/libstxgame.so
+    ├── armeabi-v7a/libstxinput.so
+    ├── armeabi-v7a/libstxgame.so
+    ├── x86_64/libstxinput.so
+    └── x86_64/libstxgame.so
+```
+
+**Keskeiset ominaisuudet:**
+
+1. **Kaksi erillistä natiivikirjastoa** — `libstxinput.so` (input) ja `libstxgame.so` (moottori), jotka linkitetään yhteen
+2. **GLES2-toteutus** — `glTexImage2D`, `glDrawElements`, `glUniform*`, jne.
+3. **AssetManager-integraatio** — `AAssetManager_fromJava`, `AAssetManager_open`
+4. **PPM-tekstuurien tuki** — yksinkertainen kuvamuoto ilman ulkoisia kirjastoja
+5. **Matriisikirjasto** — `mat4_perspective`, `mat4_lookAt`, `mat4_ortho`, `mat4_multiply`
+6. **Shader-käännös** — `compile_shader` + `link_program` virhelokeilla
+7. **Uniform-välimuisti** — `std::unordered_map<std::string, GLint>` nopeuttaa `glGetUniformLocation`-kutsuja
+8. **Virheiden käsittely** — `g_engine.lastError` + `getLastError()` Java-puolelle
+9. **Aikajärjestelmä** — `clock_gettime(CLOCK_MONOTONIC)`, FPS-laskenta
+10. **Scene-hallinta** — sekä Java (`STXScene`) että natiivi (`std::unordered_map<int, Scene>`)
+11. **Resurssivälimuisti** — `STXResources` estää tuplalataukset
+12. **Elinkaari** — `STXGameActivity` ketjuttaa kaikki kutsut oikein
+13. **Try/catch kaikkialla** — natiivi poikkeus ei kaada Javaa

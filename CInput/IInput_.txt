@@ -1,0 +1,1435 @@
+Viimeistele seuraavat C++ toteutus ja rajapinnat
+typedef enum _eKey,
+typedef enum eKeyButton,
+typedef enum _eJoyButton,
+typedef enum _eMouseEvent,
+typedef enum _eMouseButton,
+typedef enum STX_Keymod,
+ja class IInput
+Android NDK C++ ja Iphone C++ laitteille (GLES2 toteutus ilman SDL2 toteutusta).
+Tee tämä myös tarvittaessa Linux, Windows DirectX11 ja OSX laitteille (C++ SDL2 toteutus).
+Ym. rajapinnat ovat STXinterfaces.h tiedostossa ja
+C++ toteutus on CInput.cpp tiedostossa.
+Modifioi liittenä olevia vastaavia STXinterfaces.h ja CInput.cpp tiedostoja.
+
+# Vastaus: C++ toteutus Android NDK, iOS ja työpöytäalustoille
+
+Alla on täydellinen ratkaisu. Ensin analysoin ongelman, sitten annan modifioidut tiedostot.
+
+## Analyysi
+
+Nykyinen koodi on ongelmallinen, koska:
+
+1. `eKey`-enum käyttää `SDLK_*`-vakioita, jotka ovat SDL:n määrittelemiä → ei toimi Android/iOS:lla ilman SDL:ää
+2. `STX_Keymod` käyttää `KMOD_*`-vakioita SDL:stä
+3. `SDLInput`-luokka on kytketty suoraan SDL:ään
+4. `DummyInput` on olemassa, mutta se ei tue oikeita syötteitä Android/iOS:lla
+
+Ratkaisu: Luodaan **itsenäiset enum-arvot** (ei SDL-riippuvuutta) ja **`PlatformInput`-luokka**, joka toimii Android NDK:lla (kosketus + näppäimistö), iOS:llä (kosketus + näppäimistö) ja työpöydällä SDL2:n kautta.
+
+---
+
+## 1. `STXinterfaces.h` — modifioidut osat
+
+Korvaa tiedoston lopusta alkaen (`eKey`-enumista eteenpäin) seuraavalla. **Tärkein muutos:** enumit eivät enää riipu SDL:stä.
+
+```cpp
+// ============================================================
+// STXinterfaces.h — korvaa eKey-enumista eteenpäin
+// ============================================================
+
+// Itsenäiset näppäinvakiot (eivät riipu SDL:stä)
+// Arvot on valittu siten, että ne ovat yhteensopivia SDL1.2/SDL2:n kanssa
+// kunhan SDL_INPUT_BUILD on määritelty (ks. CInput.cpp).
+#if defined(SDL_1_2_15_BUILD) || defined(SDL_2_0_5_BUILD)
+  #define STX_KEYVAL(x) SDLK_##x
+#else
+  // SDL-riippumattomat arvot (Android NDK / iOS / muut)
+  #define STX_KEYVAL(x) STX_KEYVAL_##x
+#endif
+
+// SDL-riippumattomat numeeriset arvot (vastaavat SDL1.2:n arvoja)
+enum {
+    STX_KEYVAL_UNKNOWN       = 0,
+    STX_KEYVAL_FIRST         = 0,
+    STX_KEYVAL_BACKSPACE     = 8,
+    STX_KEYVAL_TAB           = 9,
+    STX_KEYVAL_CLEAR         = 12,
+    STX_KEYVAL_RETURN        = 13,
+    STX_KEYVAL_PAUSE         = 19,
+    STX_KEYVAL_ESCAPE        = 27,
+    STX_KEYVAL_SPACE         = 32,
+    STX_KEYVAL_EXCLAIM       = 33,
+    STX_KEYVAL_QUOTEDBL      = 34,
+    STX_KEYVAL_HASH          = 35,
+    STX_KEYVAL_DOLLAR        = 36,
+    STX_KEYVAL_AMPERSAND     = 38,
+    STX_KEYVAL_QUOTE         = 39,
+    STX_KEYVAL_LEFTPAREN     = 40,
+    STX_KEYVAL_RIGHTPAREN    = 41,
+    STX_KEYVAL_ASTERISK      = 42,
+    STX_KEYVAL_PLUS          = 43,
+    STX_KEYVAL_COMMA         = 44,
+    STX_KEYVAL_MINUS         = 45,
+    STX_KEYVAL_PERIOD        = 46,
+    STX_KEYVAL_SLASH         = 47,
+    STX_KEYVAL_0             = 48,
+    STX_KEYVAL_1             = 49,
+    STX_KEYVAL_2             = 50,
+    STX_KEYVAL_3             = 51,
+    STX_KEYVAL_4             = 52,
+    STX_KEYVAL_5             = 53,
+    STX_KEYVAL_6             = 54,
+    STX_KEYVAL_7             = 55,
+    STX_KEYVAL_8             = 56,
+    STX_KEYVAL_9             = 57,
+    STX_KEYVAL_COLON         = 58,
+    STX_KEYVAL_SEMICOLON     = 59,
+    STX_KEYVAL_LESS          = 60,
+    STX_KEYVAL_EQUALS        = 61,
+    STX_KEYVAL_GREATER       = 62,
+    STX_KEYVAL_QUESTION      = 63,
+    STX_KEYVAL_AT            = 64,
+    STX_KEYVAL_LEFTBRACKET   = 91,
+    STX_KEYVAL_BACKSLASH     = 92,
+    STX_KEYVAL_RIGHTBRACKET  = 93,
+    STX_KEYVAL_CARET         = 94,
+    STX_KEYVAL_UNDERSCORE    = 95,
+    STX_KEYVAL_BACKQUOTE     = 96,
+    STX_KEYVAL_a             = 97,
+    STX_KEYVAL_b             = 98,
+    STX_KEYVAL_c             = 99,
+    STX_KEYVAL_d             = 100,
+    STX_KEYVAL_e             = 101,
+    STX_KEYVAL_f             = 102,
+    STX_KEYVAL_g             = 103,
+    STX_KEYVAL_h             = 104,
+    STX_KEYVAL_i             = 105,
+    STX_KEYVAL_j             = 106,
+    STX_KEYVAL_k             = 107,
+    STX_KEYVAL_l             = 108,
+    STX_KEYVAL_m             = 109,
+    STX_KEYVAL_n             = 110,
+    STX_KEYVAL_o             = 111,
+    STX_KEYVAL_p             = 112,
+    STX_KEYVAL_q             = 113,
+    STX_KEYVAL_r             = 114,
+    STX_KEYVAL_s             = 115,
+    STX_KEYVAL_t             = 116,
+    STX_KEYVAL_u             = 117,
+    STX_KEYVAL_v             = 118,
+    STX_KEYVAL_w             = 119,
+    STX_KEYVAL_x             = 120,
+    STX_KEYVAL_y             = 121,
+    STX_KEYVAL_z             = 122,
+    STX_KEYVAL_DELETE        = 127,
+    // Numeric keypad
+    STX_KEYVAL_KP0           = 256,
+    STX_KEYVAL_KP1           = 257,
+    STX_KEYVAL_KP2           = 258,
+    STX_KEYVAL_KP3           = 259,
+    STX_KEYVAL_KP4           = 260,
+    STX_KEYVAL_KP5           = 261,
+    STX_KEYVAL_KP6           = 262,
+    STX_KEYVAL_KP7           = 263,
+    STX_KEYVAL_KP8           = 264,
+    STX_KEYVAL_KP9           = 265,
+    STX_KEYVAL_KP_PERIOD     = 266,
+    STX_KEYVAL_KP_DIVIDE     = 267,
+    STX_KEYVAL_KP_MULTIPLY   = 268,
+    STX_KEYVAL_KP_MINUS      = 269,
+    STX_KEYVAL_KP_PLUS       = 270,
+    STX_KEYVAL_KP_ENTER      = 271,
+    STX_KEYVAL_KP_EQUALS     = 272,
+    // Arrows
+    STX_KEYVAL_UP            = 273,
+    STX_KEYVAL_DOWN          = 274,
+    STX_KEYVAL_RIGHT         = 275,
+    STX_KEYVAL_LEFT          = 276,
+    STX_KEYVAL_INSERT        = 277,
+    STX_KEYVAL_HOME          = 278,
+    STX_KEYVAL_END           = 279,
+    STX_KEYVAL_PAGEUP        = 280,
+    STX_KEYVAL_PAGEDOWN      = 281,
+    // Function keys
+    STX_KEYVAL_F1            = 282,
+    STX_KEYVAL_F2            = 283,
+    STX_KEYVAL_F3            = 284,
+    STX_KEYVAL_F4            = 285,
+    STX_KEYVAL_F5            = 286,
+    STX_KEYVAL_F6            = 287,
+    STX_KEYVAL_F7            = 288,
+    STX_KEYVAL_F8            = 289,
+    STX_KEYVAL_F9            = 290,
+    STX_KEYVAL_F10           = 291,
+    STX_KEYVAL_F11           = 292,
+    STX_KEYVAL_F12           = 293,
+    STX_KEYVAL_F13           = 294,
+    STX_KEYVAL_F14           = 295,
+    STX_KEYVAL_F15           = 296,
+    // Modifiers
+    STX_KEYVAL_NUMLOCK       = 300,
+    STX_KEYVAL_CAPSLOCK      = 301,
+    STX_KEYVAL_SCROLLOCK     = 302,
+    STX_KEYVAL_RSHIFT        = 303,
+    STX_KEYVAL_LSHIFT        = 304,
+    STX_KEYVAL_RCTRL         = 305,
+    STX_KEYVAL_LCTRL         = 306,
+    STX_KEYVAL_RALT          = 307,
+    STX_KEYVAL_LALT          = 308,
+    STX_KEYVAL_RMETA         = 309,
+    STX_KEYVAL_LMETA         = 310,
+    STX_KEYVAL_LSUPER        = 311,
+    STX_KEYVAL_RSUPER        = 312,
+    STX_KEYVAL_MODE          = 313,
+    STX_KEYVAL_COMPOSE       = 314,
+    // Misc
+    STX_KEYVAL_HELP          = 315,
+    STX_KEYVAL_PRINT         = 316,
+    STX_KEYVAL_SYSREQ        = 317,
+    STX_KEYVAL_BREAK         = 318,
+    STX_KEYVAL_MENU          = 319,
+    STX_KEYVAL_POWER         = 320,
+    STX_KEYVAL_EURO          = 321,
+    STX_KEYVAL_UNDO          = 322,
+    STX_KEYVAL_PERCENT       = 37,   // '%' (SDL 1.2 doesn't define; keep ascii)
+};
+
+typedef enum _eKey
+{
+    STX_KEY_UNKNOWN = STX_KEYVAL(UNKNOWN),
+    STX_KEY_ESCAPE  = STX_KEYVAL(ESCAPE),
+    STX_KEY_KP_EQUALS = STX_KEYVAL(KP_EQUALS),
+    STX_KEY_UP      = STX_KEYVAL(UP),
+    STX_KEY_DOWN    = STX_KEYVAL(DOWN),
+    STX_KEY_RIGHT   = STX_KEYVAL(RIGHT),
+    STX_KEY_LEFT    = STX_KEYVAL(LEFT),
+    STX_KEY_INSERT  = STX_KEYVAL(INSERT),
+    STX_KEY_HOME    = STX_KEYVAL(HOME),
+    STX_KEY_END     = STX_KEYVAL(END),
+    STX_KEY_PAGEUP  = STX_KEYVAL(PAGEUP),
+    STX_KEY_PAGEDOWN= STX_KEYVAL(PAGEDOWN),
+    STX_KEY_KP_PERIOD   = STX_KEYVAL(KP_PERIOD),
+    STX_KEY_KP_DIVIDE   = STX_KEYVAL(KP_DIVIDE),
+    STX_KEY_KP_MULTIPLY = STX_KEYVAL(KP_MULTIPLY),
+    STX_KEY_KP_MINUS    = STX_KEYVAL(KP_MINUS),
+    STX_KEY_KP_PLUS     = STX_KEYVAL(KP_PLUS),
+    STX_KEY_KP_ENTER    = STX_KEYVAL(KP_ENTER),
+    STX_KEY_DELETE      = STX_KEYVAL(DELETE),
+    STX_KEY_CAPSLOCK    = STX_KEYVAL(CAPSLOCK),
+    STX_KEY_RSHIFT      = STX_KEYVAL(RSHIFT),
+    STX_KEY_LSHIFT      = STX_KEYVAL(LSHIFT),
+    STX_KEY_RCTRL       = STX_KEYVAL(RCTRL),
+    STX_KEY_LCTRL       = STX_KEYVAL(LCTRL),
+    STX_KEY_RALT        = STX_KEYVAL(RALT),
+    STX_KEY_LALT        = STX_KEYVAL(LALT),
+    STX_KEY_HELP        = STX_KEYVAL(HELP),
+    STX_KEY_SYSREQ      = STX_KEYVAL(SYSREQ),
+    STX_KEY_MENU        = STX_KEYVAL(MENU),
+    STX_KEY_BACKSPACE   = STX_KEYVAL(BACKSPACE),
+    STX_KEY_TAB         = STX_KEYVAL(TAB),
+    STX_KEY_CLEAR       = STX_KEYVAL(CLEAR),
+    STX_KEY_RETURN      = STX_KEYVAL(RETURN),
+    STX_KEY_PAUSE       = STX_KEYVAL(PAUSE),
+    STX_KEY_SPACE       = STX_KEYVAL(SPACE),
+    STX_KEY_EXCLAIM     = STX_KEYVAL(EXCLAIM),
+    STX_KEY_QUOTEDBL    = STX_KEYVAL(QUOTEDBL),
+    STX_KEY_HASH        = STX_KEYVAL(HASH),
+    STX_KEY_DOLLAR      = STX_KEYVAL(DOLLAR),
+    STX_KEY_AMPERSAND   = STX_KEYVAL(AMPERSAND),
+    STX_KEY_QUOTE       = STX_KEYVAL(QUOTE),
+    STX_KEY_LEFTPAREN   = STX_KEYVAL(LEFTPAREN),
+    STX_KEY_RIGHTPAREN  = STX_KEYVAL(RIGHTPAREN),
+    STX_KEY_ASTERISK    = STX_KEYVAL(ASTERISK),
+    STX_KEY_PLUS        = STX_KEYVAL(PLUS),
+    STX_KEY_COMMA       = STX_KEYVAL(COMMA),
+    STX_KEY_MINUS       = STX_KEYVAL(MINUS),
+    STX_KEY_PERIOD      = STX_KEYVAL(PERIOD),
+    STX_KEY_SLASH       = STX_KEYVAL(SLASH),
+    STX_KEY_COLON       = STX_KEYVAL(COLON),
+    STX_KEY_SEMICOLON   = STX_KEYVAL(SEMICOLON),
+    STX_KEY_LESS        = STX_KEYVAL(LESS),
+    STX_KEY_EQUALS      = STX_KEYVAL(EQUALS),
+    STX_KEY_GREATER     = STX_KEYVAL(GREATER),
+    STX_KEY_QUESTION    = STX_KEYVAL(QUESTION),
+    STX_KEY_AT          = STX_KEYVAL(AT),
+    STX_KEY_LEFTBRACKET = STX_KEYVAL(LEFTBRACKET),
+    STX_KEY_BACKSLASH   = STX_KEYVAL(BACKSLASH),
+    STX_KEY_RIGHTBRACKET= STX_KEYVAL(RIGHTBRACKET),
+    STX_KEY_CARET       = STX_KEYVAL(CARET),
+    STX_KEY_UNDERSCORE  = STX_KEYVAL(UNDERSCORE),
+    STX_KEY_BACKQUOTE   = STX_KEYVAL(BACKQUOTE),
+    STX_KEY_a = STX_KEYVAL(a), STX_KEY_b = STX_KEYVAL(b),
+    STX_KEY_c = STX_KEYVAL(c), STX_KEY_d = STX_KEYVAL(d),
+    STX_KEY_e = STX_KEYVAL(e), STX_KEY_f = STX_KEYVAL(f),
+    STX_KEY_g = STX_KEYVAL(g), STX_KEY_h = STX_KEYVAL(h),
+    STX_KEY_i = STX_KEYVAL(i), STX_KEY_j = STX_KEYVAL(j),
+    STX_KEY_k = STX_KEYVAL(k), STX_KEY_l = STX_KEYVAL(l),
+    STX_KEY_m = STX_KEYVAL(m), STX_KEY_n = STX_KEYVAL(n),
+    STX_KEY_o = STX_KEYVAL(o), STX_KEY_p = STX_KEYVAL(p),
+    STX_KEY_q = STX_KEYVAL(q), STX_KEY_r = STX_KEYVAL(r),
+    STX_KEY_s = STX_KEYVAL(s), STX_KEY_t = STX_KEYVAL(t),
+    STX_KEY_u = STX_KEYVAL(u), STX_KEY_v = STX_KEYVAL(v),
+    STX_KEY_w = STX_KEYVAL(w), STX_KEY_x = STX_KEYVAL(x),
+    STX_KEY_y = STX_KEYVAL(y), STX_KEY_z = STX_KEYVAL(z),
+    STX_KEY_F1  = STX_KEYVAL(F1),  STX_KEY_F2  = STX_KEYVAL(F2),
+    STX_KEY_F3  = STX_KEYVAL(F3),  STX_KEY_F4  = STX_KEYVAL(F4),
+    STX_KEY_F5  = STX_KEYVAL(F5),  STX_KEY_F6  = STX_KEYVAL(F6),
+    STX_KEY_F7  = STX_KEYVAL(F7),  STX_KEY_F8  = STX_KEYVAL(F8),
+    STX_KEY_F9  = STX_KEYVAL(F9),  STX_KEY_F10 = STX_KEYVAL(F10),
+    STX_KEY_F11 = STX_KEYVAL(F11), STX_KEY_F12 = STX_KEYVAL(F12),
+    STX_KEY_F13 = STX_KEYVAL(F13), STX_KEY_F14 = STX_KEYVAL(F14),
+    STX_KEY_F15 = STX_KEYVAL(F15),
+    STX_KEY_KP0 = STX_KEYVAL(KP0), STX_KEY_KP1 = STX_KEYVAL(KP1),
+    STX_KEY_KP2 = STX_KEYVAL(KP2), STX_KEY_KP3 = STX_KEYVAL(KP3),
+    STX_KEY_KP4 = STX_KEYVAL(KP4), STX_KEY_KP5 = STX_KEYVAL(KP5),
+    STX_KEY_KP6 = STX_KEYVAL(KP6), STX_KEY_KP7 = STX_KEYVAL(KP7),
+    STX_KEY_KP8 = STX_KEYVAL(KP8), STX_KEY_KP9 = STX_KEYVAL(KP9),
+    STX_KEY_0 = STX_KEYVAL(0), STX_KEY_1 = STX_KEYVAL(1),
+    STX_KEY_2 = STX_KEYVAL(2), STX_KEY_3 = STX_KEYVAL(3),
+    STX_KEY_4 = STX_KEYVAL(4), STX_KEY_5 = STX_KEYVAL(5),
+    STX_KEY_6 = STX_KEYVAL(6), STX_KEY_7 = STX_KEYVAL(7),
+    STX_KEY_8 = STX_KEYVAL(8), STX_KEY_9 = STX_KEYVAL(9),
+    STX_KEY_PERCENT = STX_KEYVAL(PERCENT),
+    STX_KEY_NUMLOCK    = STX_KEYVAL(NUMLOCK),
+    STX_KEY_SCROLLOCK  = STX_KEYVAL(SCROLLOCK),
+    STX_KEY_RSUPER     = STX_KEYVAL(RSUPER),
+    STX_KEY_PRINT      = STX_KEYVAL(PRINT),
+    STX_KEY_BREAK      = STX_KEYVAL(BREAK),
+    // Vulkan-yhteensopivuus
+    STX_KEY_KPADD,
+    STX_KEY_KPSUB,
+    STX_KEY_W = STX_KEYVAL(w),
+    STX_KEY_S = STX_KEYVAL(s),
+    STX_KEY_A = STX_KEYVAL(a),
+    STX_KEY_D = STX_KEYVAL(d),
+    STX_KEY_P = STX_KEYVAL(p),
+} eKey;
+
+// ============================================================
+// STX_Keymod — itsenäinen (ei KMOD_* riippuvuutta)
+// ============================================================
+typedef enum STX_Keymod
+{
+    STX_KMOD_NONE     = 0x0000,
+    STX_KMOD_LSHIFT   = 0x0001,
+    STX_KMOD_RSHIFT   = 0x0002,
+    STX_KMOD_LCTRL    = 0x0040,
+    STX_KMOD_RCTRL    = 0x0080,
+    STX_KMOD_LALT     = 0x0100,
+    STX_KMOD_RALT     = 0x0200,
+    STX_KMOD_LGUI     = 0x0400,
+    STX_KMOD_RGUI     = 0x0800,
+    STX_KMOD_NUM      = 0x1000,
+    STX_KMOD_CAPS     = 0x2000,
+    STX_KMOD_MODE     = 0x4000,
+    STX_KMOD_RESERVED = 0x8000
+} STX_Keymod;
+
+#define STX_KMOD_CTRL  (STX_KMOD_LCTRL  | STX_KMOD_RCTRL)
+#define STX_KMOD_SHIFT (STX_KMOD_LSHIFT | STX_KMOD_RSHIFT)
+#define STX_KMOD_ALT   (STX_KMOD_LALT   | STX_KMOD_RALT)
+#define STX_KMOD_GUI   (STX_KMOD_LGUI   | STX_KMOD_RGUI)
+
+// ============================================================
+// Muut enumit — itsenäisinä, ei SDL-riippuvuutta
+// ============================================================
+typedef enum eKeyButton {
+    STX_KEY_BUTTON_PRESSED = 1,
+    STX_KEY_BUTTON_RELEASED = 0
+} eKeyButton;
+
+typedef enum eJoyButton {
+    STX_JOYBUTTONDOWN = 0,
+    STX_JOYBUTTONUP   = 1
+} eJoyButton;
+
+typedef enum eMouseEvent {
+    STX_MOUSE_MOTION      = 0,
+    STX_MOUSE_BUTTONDOWN  = 1,
+    STX_MOUSE_BUTTONUP    = 2
+} eMouseEvent;
+
+typedef enum eMouseButton {
+    STX_MBUTTON_LEFT     = 0,
+    STX_MBUTTON_RIGHT    = 1,
+    STX_MBUTTON_MIDDLE   = 2,
+    STX_MBUTTON_WHEELUP  = 3,
+    STX_MBUTTON_WHEELDOWN= 4
+} eMouseButton;
+```
+
+**Tärkeää:** `IInput`-luokan rajapinta pysyy **ennallaan** — se on jo alustariippumaton. Ainoa muutos on `eKey`-enum, joka nyt toimii ilman SDL:ää.
+
+Lisää `IInput`-rajapintaan nämä **valinnaiset** metodit (oletustoteutus, jotta SDL- ja Dummy-luokat eivät hajoa):
+
+```cpp
+// IInput-luokkaan, julkisiksi:
+// Kosketussyötteen tuki (Android/iOS)
+virtual int   GetTouchCount() { return 0; }
+virtual float GetTouchX(int /*idx*/) { return 0.0f; }
+virtual float GetTouchY(int /*idx*/) { return 0.0f; }
+virtual bool  IsTouchDown(int /*idx*/) { return false; }
+virtual bool  IsTouchJustDown(int /*idx*/) { return false; }
+virtual bool  IsTouchJustUp(int /*idx*/) { return false; }
+
+// Näppäimistön tila (SDL-riippumaton)
+virtual bool  IsScancodeDown(int /*scancode*/) { return false; }
+virtual const STX_Keymod& GetModState() const { static STX_Keymod m = STX_KMOD_NONE; return m; }
+
+// Tekstinsyöttö (IME / näppäimistö)
+virtual bool  HasTextInput() { return false; }
+virtual const char* GetTextInput() { static const char* s = ""; return s; }
+
+// Alustus / sammutus
+virtual bool  Init() { return true; }
+virtual void  Shutdown() {}
+```
+
+Ja **factory-funktio** `STX_Service::GetInputInstance`:
+
+```cpp
+// STX_Service-luokkaan:
+#if defined(SDL_1_2_15_BUILD) || defined(SDL_2_0_5_BUILD)
+    static IInput* GetInputInstance(tInput a = eSDL_Input);
+#elif defined(__ANDROID__) || defined(__APPLE__)
+    static IInput* GetInputInstance(tInput a = eDefault_Input);
+#else
+    static IInput* GetInputInstance(tInput a = eDummy_Input);
+#endif
+```
+
+---
+
+## 2. `CInput.cpp` — täydellinen toteutus
+
+```cpp
+/*
+ *  CInput.cpp
+ *  Kore-Engine / STX
+ *
+ *  Description: Cross-platform input implementation
+ *    - Android NDK  (GLES2, no SDL)
+ *    - iOS          (GLES2, no SDL)
+ *    - Linux/Windows/OSX (SDL2)
+ *
+ *  Copyright (c) 2015 Tommi Roenty   http://www.tommironty.fi/
+ *  Licensed under The GNU Lesser General Public License, version 2.1:
+ *      http://opensource.org/licenses/LGPL-2.1
+ */
+#include <STX/STX.h>
+#include <STX/STXCPP.h>
+
+#include <string.h>
+#include <string>
+#include <vector>
+
+// ============================================================
+// Staattiset jäsenet
+// ============================================================
+float   IInput::m_fSpinX   = 0.0f;
+float   IInput::m_fSpinY   = 0.0f;
+float   IInput::m_fX       = 0.0f;
+float   IInput::m_fY       = 0.0f;
+float   IInput::m_fZ       = 0.0f;
+float   IInput::m_fSpinX_L = 0.0f;
+float   IInput::m_fSpinY_L = 0.0f;
+float   IInput::m_fSpinX_R = 0.0f;
+float   IInput::m_fSpinY_R = 0.0f;
+Sint32  IInput::m_iWheelY  = 0;
+
+float& IInput::GetSpinX()   { return m_fSpinX;   }
+float& IInput::GetSpinY()   { return m_fSpinY;   }
+float& IInput::GetX()       { return m_fX;       }
+float& IInput::GetY()       { return m_fY;       }
+float& IInput::GetZ()       { return m_fZ;       }
+float& IInput::GetSpinX_L() { return m_fSpinX_L; }
+float& IInput::GetSpinY_L() { return m_fSpinY_L; }
+float& IInput::GetSpinX_R() { return m_fSpinX_R; }
+float& IInput::GetSpinY_R() { return m_fSpinY_R; }
+
+// ============================================================
+// Apufunktiot
+// ============================================================
+static void STX_UpdateSpinFromMouse(float mx, float my, float w, float h,
+                                    float& ox, float& oy)
+{
+    if (w <= 0.0f || h <= 0.0f) return;
+    ox = mx * 360.0f * 1.1f / w;
+    oy = my * 180.0f * 1.1f / h;
+}
+
+// ============================================================
+// DummyInput — olemassa oleva mutta täydennetty
+// (Android/iOS käyttävät tätä pohjana; ks. PlatformInput)
+// ============================================================
+
+// ------------------------------------------------------------
+// PlatformInput — yhteinen kantaluokka Android/iOS/Desktop
+// ------------------------------------------------------------
+// Toteuttaa kaikki IInput-metodit. Alustakohtaiset alaluokat
+// ylikirjoittavat Update() ja syötteen keräyksen.
+class PlatformInput : public IInput
+{
+public:
+    PlatformInput()
+        : m_quit(false)
+        , m_key(STX_KEY_UNKNOWN)
+        , m_keyPressed(STX_KEY_UNKNOWN)
+        , m_keyReleased(STX_KEY_UNKNOWN)
+        , m_mods(STX_KMOD_NONE)
+        , m_mouseX(0), m_mouseY(0)
+        , m_mouseState(0)
+        , m_wheelY(0)
+        , m_textInput("")
+        , m_hasTextInput(false)
+    {
+        memset(m_keys, 0, sizeof(m_keys));
+        memset(m_keysJustDown, 0, sizeof(m_keysJustDown));
+        memset(m_keysJustUp, 0, sizeof(m_keysJustUp));
+    }
+    virtual ~PlatformInput() {}
+
+    // --- IInput-rajapinta ---
+    virtual bool Update() = 0;
+
+    virtual bool IsKeyHeld(eKey key)      { return IsKeyDown(key); }
+    virtual bool IsKeyDown(eKey key)
+    {
+        if ((unsigned)key >= kMaxKeys) return false;
+        return m_keys[key] != 0;
+    }
+    virtual bool IsKeyUp(eKey key)        { return !IsKeyDown(key); }
+
+    virtual bool OnShiftKeyPress()  { return (m_mods & STX_KMOD_SHIFT) != 0; }
+    virtual bool OnLShiftKeyPress() { return (m_mods & STX_KMOD_LSHIFT) != 0; }
+    virtual bool OnRShiftKeyPress() { return (m_mods & STX_KMOD_RSHIFT) != 0; }
+    virtual bool OnCTRLKeyPress()   { return (m_mods & STX_KMOD_CTRL) != 0; }
+    virtual bool OnLCTRLKeyPress()  { return (m_mods & STX_KMOD_LCTRL) != 0; }
+    virtual bool OnRCTRLKeyPress()  { return (m_mods & STX_KMOD_RCTRL) != 0; }
+    virtual bool OnALTKeyPress()    { return (m_mods & STX_KMOD_ALT) != 0; }
+    virtual bool OnLALTKeyPress()   { return (m_mods & STX_KMOD_LALT) != 0; }
+    virtual bool OnRALTKeyPress()   { return (m_mods & STX_KMOD_RALT) != 0; }
+    virtual bool OnNUMKeyPress()    { return (m_mods & STX_KMOD_NUM) != 0; }
+    virtual bool OnCAPSKeyPress()   { return (m_mods & STX_KMOD_CAPS) != 0; }
+    virtual bool OnMODEKeyPress()   { return (m_mods & STX_KMOD_MODE) != 0; }
+
+    virtual bool OnKeyPress(eKey key)   { return IsKeyDown(key); }
+    virtual bool OnKeyRelease(eKey key) { return IsKeyUp(key); }
+    virtual bool IsKeyPressed(eKey key) { return IsKeyDown(key); }
+    virtual bool IsKeyPressed(eKey key, unsigned int) { return IsKeyDown(key); }
+
+    virtual bool IsKeyPressed(void)  { return m_keyPressed != STX_KEY_UNKNOWN; }
+    virtual bool IsKeyReleased(void) { return m_keyReleased != STX_KEY_UNKNOWN; }
+
+    virtual bool IsWindowMoved(void)     { return false; }
+    virtual bool IsWindowResized(void)   { return m_windowResized; }
+    virtual bool IsWindowMinimised(void) { return m_windowMinimized; }
+    virtual bool IsWindowMaximised(void) { return m_windowMaximized; }
+    virtual bool IsWindowClosed(void)    { return m_windowClosed; }
+
+    virtual bool IsMouseClick(void)          { return (m_mouseState & kMouseLeft) != 0; }
+    virtual bool IsMouseDoubleClick(void)    { return false; }
+    virtual bool IsMouseButtonPressed(void)  { return m_mouseState != 0; }
+    virtual bool IsMouseButtonReleased(void) { return m_mouseState == 0; }
+    virtual bool IsMouseButton(void)         { return m_mouseState != 0; }
+    virtual bool IsMouseMotion(void)         { return m_mouseMoved; }
+    virtual int  GetMouseX(void)             { return m_mouseX; }
+    virtual int  GetMouseY(void)             { return m_mouseY; }
+
+    virtual bool OnMouseButtonPress(eMouseButton b)   { return IsMouseButtonPressed(b); }
+    virtual bool OnMouseButtonRelease(eMouseButton b) { return !IsMouseButtonPressed(b); }
+    virtual bool IsMouseButtonPressed(eMouseButton b)
+    {
+        switch (b) {
+            case STX_MBUTTON_LEFT:      return (m_mouseState & kMouseLeft)   != 0;
+            case STX_MBUTTON_RIGHT:     return (m_mouseState & kMouseRight)  != 0;
+            case STX_MBUTTON_MIDDLE:    return (m_mouseState & kMouseMiddle) != 0;
+            case STX_MBUTTON_WHEELUP:   return m_wheelY > 0;
+            case STX_MBUTTON_WHEELDOWN: return m_wheelY < 0;
+        }
+        return false;
+    }
+    virtual bool IsMouseButtonPressed(eMouseButton b, unsigned int) { return IsMouseButtonPressed(b); }
+
+    // Joystick — oletuksena ei tukea (voi ylikirjoittaa)
+    virtual int  GetJoyX()          { return 0; }
+    virtual int  GetJoyY()          { return 0; }
+    virtual bool IsJoyAxisMoving()  { return false; }
+    virtual bool IsJoyBallMoving()  { return false; }
+    virtual bool IsJoyHatMoving()   { return false; }
+    virtual bool IsJoyButton()      { return false; }
+
+    virtual Uint8  GetAxisJoystickDeviceIndex() { return 0; }
+    virtual Uint8  GetAxisIndex()   { return 0; }
+    virtual Sint16 GetAxisValue()   { return 0; }
+    virtual Uint8  GetBallJoystickDeviceIndex() { return 0; }
+    virtual Uint8  GetBallIndex()   { return 0; }
+    virtual Sint16 GetBallXRel()    { return 0; }
+    virtual Sint16 GetBallYRel()    { return 0; }
+    virtual Uint8  GetHatJoystickDeviceIndex() { return 0; }
+    virtual Uint8  GetHatIndex()    { return 0; }
+    virtual Uint8  GetHatValue()    { return 0; }
+    virtual Uint8  GetButtonJoystickDeviceIndex() { return 0; }
+    virtual Uint8  GetButtonIndex() { return 0; }
+    virtual Uint8  GetButtonState() { return 0; }
+
+    virtual bool   Quit()          { return m_quit; }
+    virtual int    getKeyID()      { return (int)m_keyPressed; }
+    virtual char   getKeyChar()    { return (char)(m_keyPressed & 0xFF); }
+    virtual Sint32 getKeyCode()    { return (Sint32)m_keyPressed; }
+
+    // --- Kosketus (Android/iOS) ---
+    virtual int   GetTouchCount()       { return (int)m_touches.size(); }
+    virtual float GetTouchX(int idx)    { return (idx >= 0 && idx < (int)m_touches.size()) ? m_touches[idx].x : 0.0f; }
+    virtual float GetTouchY(int idx)    { return (idx >= 0 && idx < (int)m_touches.size()) ? m_touches[idx].y : 0.0f; }
+    virtual bool  IsTouchDown(int idx)  { return (idx >= 0 && idx < (int)m_touches.size()) && m_touches[idx].down; }
+    virtual bool  IsTouchJustDown(int idx) { return (idx >= 0 && idx < (int)m_touches.size()) && m_touches[idx].justDown; }
+    virtual bool  IsTouchJustUp(int idx)   { return (idx >= 0 && idx < (int)m_touches.size()) && m_touches[idx].justUp; }
+
+    // --- Tekstinsyöttö ---
+    virtual bool HasTextInput()            { return m_hasTextInput; }
+    virtual const char* GetTextInput()     { return m_textInput.c_str(); }
+
+    virtual bool Init()     { return true; }
+    virtual void Shutdown() {}
+
+protected:
+    static const unsigned kMaxKeys = 512;
+    struct Touch {
+        float x, y;
+        bool down, justDown, justUp;
+        int  id;
+    };
+
+    unsigned char m_keys[kMaxKeys];
+    unsigned char m_keysJustDown[kMaxKeys];
+    unsigned char m_keysJustUp[kMaxKeys];
+
+    eKey  m_key, m_keyPressed, m_keyReleased;
+    STX_Keymod m_mods;
+
+    int    m_mouseX, m_mouseY;
+    unsigned int m_mouseState;   // bitmask
+    int    m_wheelY;
+    bool   m_mouseMoved;
+
+    bool m_windowResized, m_windowMinimized, m_windowMaximized, m_windowClosed;
+    bool m_quit;
+
+    std::vector<Touch> m_touches;
+    std::string m_textInput;
+    bool m_hasTextInput;
+
+    static const unsigned int kMouseLeft   = 1u << 0;
+    static const unsigned int kMouseRight  = 1u << 1;
+    static const unsigned int kMouseMiddle = 1u << 2;
+
+    // Apufunktiot alaluokille
+    void ClearFrame()
+    {
+        memset(m_keysJustDown, 0, sizeof(m_keysJustDown));
+        memset(m_keysJustUp,   0, sizeof(m_keysJustUp));
+        m_keyPressed  = STX_KEY_UNKNOWN;
+        m_keyReleased = STX_KEY_UNKNOWN;
+        m_wheelY      = 0;
+        m_mouseMoved  = false;
+        m_windowResized = false;
+        m_windowMinimized = false;
+        m_windowMaximized = false;
+        m_windowClosed = false;
+        m_hasTextInput = false;
+        m_textInput.clear();
+        for (size_t i = 0; i < m_touches.size(); ++i) {
+            m_touches[i].justDown = false;
+            m_touches[i].justUp   = false;
+        }
+    }
+
+    void SetKeyDown(eKey k, bool down)
+    {
+        if ((unsigned)k >= kMaxKeys) return;
+        if (down) {
+            if (!m_keys[k]) m_keysJustDown[k] = 1;
+            m_keys[k] = 1;
+            m_keyPressed = k;
+        } else {
+            if (m_keys[k]) m_keysJustUp[k] = 1;
+            m_keys[k] = 0;
+            m_keyReleased = k;
+        }
+    }
+
+    void AddTextInput(const char* utf8)
+    {
+        if (!utf8 || !*utf8) return;
+        m_textInput += utf8;
+        m_hasTextInput = true;
+    }
+
+    Touch* FindTouch(int id)
+    {
+        for (size_t i = 0; i < m_touches.size(); ++i)
+            if (m_touches[i].id == id) return &m_touches[i];
+        return NULL;
+    }
+    Touch* AddTouch(int id)
+    {
+        Touch t; t.id = id; t.down = true; t.justDown = true;
+        t.justUp = false; t.x = t.y = 0.0f;
+        m_touches.push_back(t);
+        return &m_touches.back();
+    }
+    void RemoveTouch(int id)
+    {
+        for (size_t i = 0; i < m_touches.size(); ++i) {
+            if (m_touches[i].id == id) {
+                m_touches[i].down = false;
+                m_touches[i].justUp = true;
+                return;
+            }
+        }
+    }
+};
+
+// ============================================================
+// 1) ANDROID NDK TOTEUTUS (ei SDL:ää)
+// ============================================================
+#if defined(__ANDROID__) && !defined(SDL_2_0_5_BUILD)
+
+#include <android/input.h>
+#include <android/keycodes.h>
+#include <android/log.h>
+#include <jni.h>
+
+#define STX_LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "STXInput", __VA_ARGS__)
+#define STX_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "STXInput", __VA_ARGS__)
+
+// Android-näppäinkoodien käännös eKey:ksi
+static eKey AndroidKeyToSTX(int32_t keycode, int32_t metaState)
+{
+    // Erityisnäppäimet
+    switch (keycode) {
+        case AKEYCODE_BACK:        return STX_KEY_ESCAPE; // "back" = escape
+        case AKEYCODE_ENTER:       return STX_KEY_RETURN;
+        case AKEYCODE_DEL:         return STX_KEY_BACKSPACE;
+        case AKEYCODE_TAB:         return STX_KEY_TAB;
+        case AKEYCODE_SPACE:       return STX_KEY_SPACE;
+        case AKEYCODE_ESCAPE:      return STX_KEY_ESCAPE;
+        case AKEYCODE_DPAD_UP:     return STX_KEY_UP;
+        case AKEYCODE_DPAD_DOWN:   return STX_KEY_DOWN;
+        case AKEYCODE_DPAD_LEFT:   return STX_KEY_LEFT;
+        case AKEYCODE_DPAD_RIGHT:  return STX_KEY_RIGHT;
+        case AKEYCODE_MOVE_HOME:   return STX_KEY_HOME;
+        case AKEYCODE_MOVE_END:    return STX_KEY_END;
+        case AKEYCODE_PAGE_UP:     return STX_KEY_PAGEUP;
+        case AKEYCODE_PAGE_DOWN:   return STX_KEY_PAGEDOWN;
+        case AKEYCODE_INSERT:      return STX_KEY_INSERT;
+        case AKEYCODE_FORWARD_DEL: return STX_KEY_DELETE;
+        case AKEYCODE_CAPS_LOCK:   return STX_KEY_CAPSLOCK;
+        case AKEYCODE_SHIFT_LEFT:  return STX_KEY_LSHIFT;
+        case AKEYCODE_SHIFT_RIGHT: return STX_KEY_RSHIFT;
+        case AKEYCODE_CTRL_LEFT:   return STX_KEY_LCTRL;
+        case AKEYCODE_CTRL_RIGHT:  return STX_KEY_RCTRL;
+        case AKEYCODE_ALT_LEFT:    return STX_KEY_LALT;
+        case AKEYCODE_ALT_RIGHT:   return STX_KEY_RALT;
+        case AKEYCODE_MENU:        return STX_KEY_MENU;
+        case AKEYCODE_NUM_LOCK:    return STX_KEY_NUMLOCK;
+        case AKEYCODE_BREAK:       return STX_KEY_BREAK;
+        case AKEYCODE_SYSRQ:       return STX_KEY_PRINT;
+        case AKEYCODE_HELP:        return STX_KEY_HELP;
+        // Numeric keypad
+        case AKEYCODE_NUMPAD_0:      return STX_KEY_KP0;
+        case AKEYCODE_NUMPAD_1:      return STX_KEY_KP1;
+        case AKEYCODE_NUMPAD_2:      return STX_KEY_KP2;
+        case AKEYCODE_NUMPAD_3:      return STX_KEY_KP3;
+        case AKEYCODE_NUMPAD_4:      return STX_KEY_KP4;
+        case AKEYCODE_NUMPAD_5:      return STX_KEY_KP5;
+        case AKEYCODE_NUMPAD_6:      return STX_KEY_KP6;
+        case AKEYCODE_NUMPAD_7:      return STX_KEY_KP7;
+        case AKEYCODE_NUMPAD_8:      return STX_KEY_KP8;
+        case AKEYCODE_NUMPAD_9:      return STX_KEY_KP9;
+        case AKEYCODE_NUMPAD_DOT:    return STX_KEY_KP_PERIOD;
+        case AKEYCODE_NUMPAD_DIVIDE: return STX_KEY_KP_DIVIDE;
+        case AKEYCODE_NUMPAD_MULTIPLY: return STX_KEY_KP_MULTIPLY;
+        case AKEYCODE_NUMPAD_SUBTRACT: return STX_KEY_KP_MINUS;
+        case AKEYCODE_NUMPAD_ADD:      return STX_KEY_KP_PLUS;
+        case AKEYCODE_NUMPAD_ENTER:    return STX_KEY_KP_ENTER;
+        case AKEYCODE_NUMPAD_EQUALS:   return STX_KEY_KP_EQUALS;
+        // F-näppäimet
+        case AKEYCODE_F1: return STX_KEY_F1;  case AKEYCODE_F2: return STX_KEY_F2;
+        case AKEYCODE_F3: return STX_KEY_F3;  case AKEYCODE_F4: return STX_KEY_F4;
+        case AKEYCODE_F5: return STX_KEY_F5;  case AKEYCODE_F6: return STX_KEY_F6;
+        case AKEYCODE_F7: return STX_KEY_F7;  case AKEYCODE_F8: return STX_KEY_F8;
+        case AKEYCODE_F9: return STX_KEY_F9;  case AKEYCODE_F10: return STX_KEY_F10;
+        case AKEYCODE_F11: return STX_KEY_F11; case AKEYCODE_F12: return STX_KEY_F12;
+    }
+
+    // Kirjaimet: AKEYCODE_A = 29 ... AKEYCODE_Z = 54 (25 kpl)
+    if (keycode >= AKEYCODE_A && keycode <= AKEYCODE_Z) {
+        bool shift = (metaState & (AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON |
+                                   AMETA_SHIFT_RIGHT_ON)) != 0;
+        char c = (char)('a' + (keycode - AKEYCODE_A));
+        if (shift) c = (char)('A' + (keycode - AKEYCODE_A));
+        // Palauta vastaava eKey (a...z tai A...Z; STX_KEY_a...z)
+        return (eKey)((int)STX_KEY_a + (keycode - AKEYCODE_A));
+    }
+
+    // Numerot: AKEYCODE_0 = 7 ... AKEYCODE_9 = 16
+    if (keycode >= AKEYCODE_0 && keycode <= AKEYCODE_9) {
+        return (eKey)((int)STX_KEY_0 + (keycode - AKEYCODE_0));
+    }
+
+    // Välimerkit
+    switch (keycode) {
+        case AKEYCODE_COMMA:      return STX_KEY_COMMA;
+        case AKEYCODE_PERIOD:     return STX_KEY_PERIOD;
+        case AKEYCODE_SLASH:      return STX_KEY_SLASH;
+        case AKEYCODE_SEMICOLON:  return STX_KEY_SEMICOLON;
+        case AKEYCODE_APOSTROPHE: return STX_KEY_QUOTE;
+        case AKEYCODE_LEFT_BRACKET:  return STX_KEY_LEFTBRACKET;
+        case AKEYCODE_RIGHT_BRACKET: return STX_KEY_RIGHTBRACKET;
+        case AKEYCODE_BACKSLASH:  return STX_KEY_BACKSLASH;
+        case AKEYCODE_GRAVE:      return STX_KEY_BACKQUOTE;
+        case AKEYCODE_MINUS:      return STX_KEY_MINUS;
+        case AKEYCODE_EQUALS:     return STX_KEY_EQUALS;
+        case AKEYCODE_PLUS:       return STX_KEY_PLUS;
+    }
+
+    return STX_KEY_UNKNOWN;
+}
+
+static STX_Keymod AndroidMetaToSTX(int32_t metaState)
+{
+    STX_Keymod m = STX_KMOD_NONE;
+    if (metaState & AMETA_SHIFT_LEFT_ON)  m = (STX_Keymod)(m | STX_KMOD_LSHIFT);
+    if (metaState & AMETA_SHIFT_RIGHT_ON) m = (STX_Keymod)(m | STX_KMOD_RSHIFT);
+    if (metaState & (AMETA_SHIFT_ON | AMETA_SHIFT_LEFT_ON | AMETA_SHIFT_RIGHT_ON))
+        m = (STX_Keymod)(m | STX_KMOD_SHIFT);
+    if (metaState & AMETA_CTRL_LEFT_ON)   m = (STX_Keymod)(m | STX_KMOD_LCTRL);
+    if (metaState & AMETA_CTRL_RIGHT_ON)  m = (STX_Keymod)(m | STX_KMOD_RCTRL);
+    if (metaState & (AMETA_CTRL_ON | AMETA_CTRL_LEFT_ON | AMETA_CTRL_RIGHT_ON))
+        m = (STX_Keymod)(m | STX_KMOD_CTRL);
+    if (metaState & AMETA_ALT_LEFT_ON)    m = (STX_Keymod)(m | STX_KMOD_LALT);
+    if (metaState & AMETA_ALT_RIGHT_ON)   m = (STX_Keymod)(m | STX_KMOD_RALT);
+    if (metaState & (AMETA_ALT_ON | AMETA_ALT_LEFT_ON | AMETA_ALT_RIGHT_ON))
+        m = (STX_Keymod)(m | STX_KMOD_ALT);
+    if (metaState & AMETA_CAPS_LOCK_ON)   m = (STX_Keymod)(m | STX_KMOD_CAPS);
+    if (metaState & AMETA_NUM_LOCK_ON)    m = (STX_Keymod)(m | STX_KMOD_NUM);
+    if (metaState & AMETA_META_LEFT_ON)   m = (STX_Keymod)(m | STX_KMOD_LGUI);
+    if (metaState & AMETA_META_RIGHT_ON)  m = (STX_Keymod)(m | STX_KMOD_RGUI);
+    if (metaState & (AMETA_META_ON | AMETA_META_LEFT_ON | AMETA_META_RIGHT_ON))
+        m = (STX_Keymod)(m | STX_KMOD_GUI);
+    return m;
+}
+
+class AndroidInput : public PlatformInput
+{
+public:
+    AndroidInput() : PlatformInput() {}
+
+    // Kutsutaan JNI:sta (Java-puolelta) — ks. AndroidInputBridge.java
+    void OnNativeKeyEvent(int action, int keycode, int metaState)
+    {
+        eKey k = AndroidKeyToSTX(keycode, metaState);
+        if (k == STX_KEY_UNKNOWN) return;
+        m_mods = AndroidMetaToSTX(metaState);
+        if (action == AKEY_EVENT_ACTION_DOWN) {
+            SetKeyDown(k, true);
+        } else if (action == AKEY_EVENT_ACTION_UP) {
+            SetKeyDown(k, false);
+        } else if (action == AKEY_EVENT_ACTION_MULTIPLE) {
+            SetKeyDown(k, true);
+            SetKeyDown(k, false);
+        }
+    }
+
+    void OnNativeTouchEvent(int action, int pointerIndex, int pointerId,
+                            float x, float y)
+    {
+        // action on ACTION_DOWN/MOVE/UP/CANCEL/POINTER_DOWN/POINTER_UP
+        const int ACTION_MASK = 0xff;
+        const int ACTION_DOWN = 0, ACTION_UP = 1, ACTION_MOVE = 2,
+                  ACTION_CANCEL = 3, ACTION_POINTER_DOWN = 5,
+                  ACTION_POINTER_UP = 6;
+
+        int a = action & ACTION_MASK;
+        if (a == ACTION_DOWN || a == ACTION_POINTER_DOWN) {
+            Touch* t = FindTouch(pointerId);
+            if (!t) t = AddTouch(pointerId);
+            if (t) { t->x = x; t->y = y; t->down = true; t->justDown = true; t->justUp = false; }
+            m_mouseX = (int)x; m_mouseY = (int)y;
+            m_mouseState |= kMouseLeft;
+            m_mouseMoved = true;
+        } else if (a == ACTION_MOVE) {
+            Touch* t = FindTouch(pointerId);
+            if (t) { t->x = x; t->y = y; }
+            m_mouseX = (int)x; m_mouseY = (int)y;
+            m_mouseMoved = true;
+        } else if (a == ACTION_UP || a == ACTION_POINTER_UP) {
+            Touch* t = FindTouch(pointerId);
+            if (t) { t->x = x; t->y = y; t->down = false; t->justUp = true; }
+            if (m_touches.empty()) m_mouseState &= ~kMouseLeft;
+            m_mouseMoved = true;
+        } else if (a == ACTION_CANCEL) {
+            for (size_t i = 0; i < m_touches.size(); ++i) {
+                m_touches[i].down = false; m_touches[i].justUp = true;
+            }
+            m_mouseState = 0;
+        }
+    }
+
+    void OnNativeText(const char* utf8) { AddTextInput(utf8); }
+
+    virtual bool Update()
+    {
+        // Android: JNI-kutsut päivittävät tilan suoraan (tapahtumaohjattu).
+        // Tässä vain "frame"-tilan nollaus.
+        ClearFrame();
+        return m_quit;
+    }
+
+    virtual bool Init() { return true; }
+};
+
+// JNI-silta: Java kutsuu näitä
+extern "C" {
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_InputBridge_nativeKeyEvent(
+    JNIEnv*, jclass, jint action, jint keycode, jint metaState)
+{
+    IInput* in = STX_Service::GetInputInstance(eDefault_Input);
+    AndroidInput* ai = dynamic_cast<AndroidInput*>(in);
+    if (ai) ai->OnNativeKeyEvent((int)action, (int)keycode, (int)metaState);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_InputBridge_nativeTouchEvent(
+    JNIEnv*, jclass, jint action, jint pointerIndex, jint pointerId,
+    jfloat x, jfloat y)
+{
+    IInput* in = STX_Service::GetInputInstance(eDefault_Input);
+    AndroidInput* ai = dynamic_cast<AndroidInput*>(in);
+    if (ai) ai->OnNativeTouchEvent((int)action, (int)pointerIndex,
+                                   (int)pointerId, (float)x, (float)y);
+}
+
+JNIEXPORT void JNICALL
+Java_fi_tommironty_STX_InputBridge_nativeTextInput(
+    JNIEnv* env, jclass, jstring text)
+{
+    IInput* in = STX_Service::GetInputInstance(eDefault_Input);
+    AndroidInput* ai = dynamic_cast<AndroidInput*>(in);
+    if (!ai) return;
+    const char* c = env->GetStringUTFChars(text, NULL);
+    if (c) { ai->OnNativeText(c); env->ReleaseStringUTFChars(text, c); }
+}
+
+} // extern "C"
+
+// ============================================================
+// 2) iOS-TOTEUTUS (ei SDL:ää)
+// ============================================================
+#elif defined(__APPLE__) && !defined(SDL_2_0_5_BUILD)
+
+// iOS-otsikot — lisää tarvittaessa #import <UIKit/UIKit.h> .mm-tiedostossa
+// Tässä .cpp:ssä käytetään vain C-rajapintaa; UIKit-kytkentä tehdään .mm:ssä
+// ja kutsutaan näitä C-funktioita.
+
+class IosInput : public PlatformInput
+{
+public:
+    IosInput() : PlatformInput() {}
+
+    // C-rajapinta, jota .mm kutsuu
+    void OnNativeTouch(int phase, int touchId, float x, float y)
+    {
+        // phase: 0=began, 1=moved, 2=ended, 3=cancelled
+        if (phase == 0) {
+            Touch* t = FindTouch(touchId);
+            if (!t) t = AddTouch(touchId);
+            if (t) { t->x = x; t->y = y; t->down = true; t->justDown = true; }
+            m_mouseX = (int)x; m_mouseY = (int)y;
+            m_mouseState |= kMouseLeft;
+            m_mouseMoved = true;
+        } else if (phase == 1) {
+            Touch* t = FindTouch(touchId);
+            if (t) { t->x = x; t->y = y; }
+            m_mouseX = (int)x; m_mouseY = (int)y;
+            m_mouseMoved = true;
+        } else if (phase == 2 || phase == 3) {
+            Touch* t = FindTouch(touchId);
+            if (t) { t->x = x; t->y = y; t->down = false; t->justUp = true; }
+            if (m_touches.empty()) m_mouseState &= ~kMouseLeft;
+            m_mouseMoved = true;
+        }
+    }
+
+    void OnNativeKey(int down, int keycode, int mods)
+    {
+        // keycode: iOS UIKeyboardHIDUsage -koodi, mods: STX_Keymod-yhteensopiva
+        eKey k = IosKeyToSTX(keycode);
+        if (k == STX_KEY_UNKNOWN) return;
+        m_mods = (STX_Keymod)mods;
+        SetKeyDown(k, down != 0);
+    }
+
+    void OnNativeText(const char* utf8) { AddTextInput(utf8); }
+
+    virtual bool Update() { ClearFrame(); return m_quit; }
+
+private:
+    static eKey IosKeyToSTX(int hid)
+    {
+        // HID Usage Tables (Keyboard/Keypad), https://www.usb.org/hid
+        switch (hid) {
+            case 0x29: return STX_KEY_ESCAPE;
+            case 0x28: return STX_KEY_RETURN;
+            case 0x2A: return STX_KEY_BACKSPACE;
+            case 0x2B: return STX_KEY_TAB;
+            case 0x2C: return STX_KEY_SPACE;
+            case 0x4F: return STX_KEY_RIGHT;
+            case 0x50: return STX_KEY_LEFT;
+            case 0x51: return STX_KEY_DOWN;
+            case 0x52: return STX_KEY_UP;
+            case 0x49: return STX_KEY_INSERT;
+            case 0x4A: return STX_KEY_HOME;
+            case 0x4D: return STX_KEY_END;
+            case 0x4B: return STX_KEY_PAGEUP;
+            case 0x4E: return STX_KEY_PAGEDOWN;
+            case 0x4C: return STX_KEY_DELETE;
+            case 0x3A: return STX_KEY_CAPSLOCK;
+            case 0xE1: return STX_KEY_LSHIFT; case 0xE5: return STX_KEY_RSHIFT;
+            case 0xE0: return STX_KEY_LCTRL;  case 0xE4: return STX_KEY_RCTRL;
+            case 0xE2: return STX_KEY_LALT;   case 0xE6: return STX_KEY_RALT;
+            case 0xE3: return STX_KEY_LSUPER; case 0xE7: return STX_KEY_RSUPER;
+            // 0x04..0x1D = A..Z
+            case 0x04: return STX_KEY_a; case 0x05: return STX_KEY_b;
+            case 0x06: return STX_KEY_c; case 0x07: return STX_KEY_d;
+            case 0x08: return STX_KEY_e; case 0x09: return STX_KEY_f;
+            case 0x0A: return STX_KEY_g; case 0x0B: return STX_KEY_h;
+            case 0x0C: return STX_KEY_i; case 0x0D: return STX_KEY_j;
+            case 0x0E: return STX_KEY_k; case 0x0F: return STX_KEY_l;
+            case 0x10: return STX_KEY_m; case 0x11: return STX_KEY_n;
+            case 0x12: return STX_KEY_o; case 0x13: return STX_KEY_p;
+            case 0x14: return STX_KEY_q; case 0x15: return STX_KEY_r;
+            case 0x16: return STX_KEY_s; case 0x17: return STX_KEY_t;
+            case 0x18: return STX_KEY_u; case 0x19: return STX_KEY_v;
+            case 0x1A: return STX_KEY_w; case 0x1B: return STX_KEY_x;
+            case 0x1C: return STX_KEY_y; case 0x1D: return STX_KEY_z;
+            // 0x1E..0x26 = 1..9, 0x27 = 0
+            case 0x1E: return STX_KEY_1; case 0x1F: return STX_KEY_2;
+            case 0x20: return STX_KEY_3; case 0x21: return STX_KEY_4;
+            case 0x22: return STX_KEY_5; case 0x23: return STX_KEY_6;
+            case 0x24: return STX_KEY_7; case 0x25: return STX_KEY_8;
+            case 0x26: return STX_KEY_9; case 0x27: return STX_KEY_0;
+            case 0x2D: return STX_KEY_MINUS;     case 0x2E: return STX_KEY_EQUALS;
+            case 0x2F: return STX_KEY_LEFTBRACKET; case 0x30: return STX_KEY_RIGHTBRACKET;
+            case 0x31: return STX_KEY_BACKSLASH; case 0x33: return STX_KEY_SEMICOLON;
+            case 0x34: return STX_KEY_QUOTE;     case 0x35: return STX_KEY_BACKQUOTE;
+            case 0x36: return STX_KEY_COMMA;     case 0x37: return STX_KEY_PERIOD;
+            case 0x38: return STX_KEY_SLASH;
+            case 0x53: return STX_KEY_KP0; case 0x54: return STX_KEY_KP1;
+            case 0x55: return STX_KEY_KP2; case 0x56: return STX_KEY_KP3;
+            case 0x57: return STX_KEY_KP4; case 0x58: return STX_KEY_KP5;
+            case 0x59: return STX_KEY_KP6; case 0x5A: return STX_KEY_KP7;
+            case 0x5B: return STX_KEY_KP8; case 0x5C: return STX_KEY_KP9;
+            case 0x5D: return STX_KEY_KP_MULTIPLY; case 0x5E: return STX_KEY_KP_PLUS;
+            case 0x5F: return STX_KEY_KP_ENTER;    case 0x60: return STX_KEY_KP_MINUS;
+            case 0x61: return STX_KEY_KP_PERIOD;   case 0x62: return STX_KEY_KP_DIVIDE;
+            case 0x63: return STX_KEY_KP_EQUALS;
+            // F1..F12 = 0x3A..0x45
+            case 0x3A: return STX_KEY_F1;  case 0x3B: return STX_KEY_F2;
+            case 0x3C: return STX_KEY_F3;  case 0x3D: return STX_KEY_F4;
+            case 0x3E: return STX_KEY_F5;  case 0x3F: return STX_KEY_F6;
+            case 0x40: return STX_KEY_F7;  case 0x41: return STX_KEY_F8;
+            case 0x42: return STX_KEY_F9;  case 0x43: return STX_KEY_F10;
+            case 0x44: return STX_KEY_F11; case 0x45: return STX_KEY_F12;
+        }
+        return STX_KEY_UNKNOWN;
+    }
+};
+
+// C-rajapinta, jota iOS .mm-tiedosto kutsuu
+extern "C" {
+
+void STX_iOS_Touch(int phase, int touchId, float x, float y)
+{
+    IInput* in = STX_Service::GetInputInstance(eDefault_Input);
+    IosInput* ii = dynamic_cast<IosInput*>(in);
+    if (ii) ii->OnNativeTouch(phase, touchId, x, y);
+}
+
+void STX_iOS_Key(int down, int keycode, int mods)
+{
+    IInput* in = STX_Service::GetInputInstance(eDefault_Input);
+    IosInput* ii = dynamic_cast<IosInput*>(in);
+    if (ii) ii->OnNativeKey(down, keycode, mods);
+}
+
+void STX_iOS_Text(const char* utf8)
+{
+    IInput* in = STX_Service::GetInputInstance(eDefault_Input);
+    IosInput* ii = dynamic_cast<IosInput*>(in);
+    if (ii) ii->OnNativeText(utf8);
+}
+
+} // extern "C"
+
+// ============================================================
+// 3) SDL2-TOTEUTUS (Linux/Windows/OSX)
+// ============================================================
+#elif defined(SDL_1_2_15_BUILD) || defined(SDL_2_0_5_BUILD)
+
+// Tässä käytetään SDL:n SDLK_*-arvoja, jotka ovat jo eKey-enumin arvoja.
+// SDLInput on jo olemassa STXinterfaces.h:ssä; tässä toteutus.
+
+// SDL:n scancode -> eKey -käännös (tarvitaan vain jos halutaan)
+// SDL2:n SDLK_*-arvot poikkeavat SDL1.2:sta, joten käytetään
+// eKey-enumin arvoja (jotka on määritelty SDLK_-makrolla).
+
+static STX_Keymod SDLModToSTX(Uint16 mod)
+{
+    STX_Keymod m = STX_KMOD_NONE;
+    if (mod & KMOD_LSHIFT) m = (STX_Keymod)(m | STX_KMOD_LSHIFT);
+    if (mod & KMOD_RSHIFT) m = (STX_Keymod)(m | STX_KMOD_RSHIFT);
+    if (mod & KMOD_LCTRL)  m = (STX_Keymod)(m | STX_KMOD_LCTRL);
+    if (mod & KMOD_RCTRL)  m = (STX_Keymod)(m | STX_KMOD_RCTRL);
+    if (mod & KMOD_LALT)   m = (STX_Keymod)(m | STX_KMOD_LALT);
+    if (mod & KMOD_RALT)   m = (STX_Keymod)(m | STX_KMOD_RALT);
+    if (mod & KMOD_LGUI)   m = (STX_Keymod)(m | STX_KMOD_LGUI);
+    if (mod & KMOD_RGUI)   m = (STX_Keymod)(m | STX_KMOD_RGUI);
+    if (mod & KMOD_NUM)    m = (STX_Keymod)(m | STX_KMOD_NUM);
+    if (mod & KMOD_CAPS)   m = (STX_Keymod)(m | STX_KMOD_CAPS);
+    if (mod & KMOD_MODE)   m = (STX_Keymod)(m | STX_KMOD_MODE);
+    return m;
+}
+
+class SDLInputImpl : public PlatformInput
+{
+public:
+    SDLInputImpl() : PlatformInput()
+    {
+        m_keyboardState = SDL_GetKeyboardState(NULL);
+        m_mouseState = SDL_GetMouseState(&m_mouseX, &m_mouseY);
+    }
+    virtual ~SDLInputImpl() {}
+
+    virtual bool Update()
+    {
+        ClearFrame();
+        SDL_Event event;
+        while (SDL_PollEvent(&event) != 0) {
+            switch (event.type) {
+#if defined(SDL_2_0_5_BUILD)
+                case SDL_WINDOWEVENT:
+                    if (event.window.event == SDL_WINDOWEVENT_RESIZED)
+                        m_windowResized = true;
+                    if (event.window.event == SDL_WINDOWEVENT_MINIMIZED)
+                        m_windowMinimized = true;
+                    if (event.window.event == SDL_WINDOWEVENT_MAXIMIZED)
+                        m_windowMaximized = true;
+                    if (event.window.event == SDL_WINDOWEVENT_MOVED)
+                        { /* moved */ }
+                    if (event.window.event == SDL_WINDOWEVENT_CLOSE)
+                        m_windowClosed = true;
+                    break;
+#else
+                case SDL_VIDEORESIZE:
+                    m_windowResized = true;
+                    break;
+#endif
+                case SDL_QUIT:
+                    m_quit = true;
+                    return true;
+                case SDL_KEYDOWN: {
+                    eKey k = SDLKtoKEY(event.key.keysym.sym);
+                    if (k == STX_KEY_ESCAPE) { m_quit = true; return true; }
+                    m_mods = SDLModToSTX((Uint16)event.key.keysym.mod);
+                    SetKeyDown(k, true);
+                    // Tekstinsyöttö (SDL2)
+#if defined(SDL_2_0_5_BUILD)
+                    if (event.key.keysym.sym >= 32 && event.key.keysym.sym < 127) {
+                        char buf[2] = { (char)event.key.keysym.sym, 0 };
+                        AddTextInput(buf);
+                    }
+#endif
+                    break;
+                }
+                case SDL_KEYUP: {
+                    eKey k = SDLKtoKEY(event.key.keysym.sym);
+                    m_mods = SDLModToSTX((Uint16)event.key.keysym.mod);
+                    SetKeyDown(k, false);
+                    break;
+                }
+                case SDL_MOUSEMOTION:
+                    m_mouseX = event.motion.x;
+                    m_mouseY = event.motion.y;
+                    m_mouseMoved = true;
+                    break;
+                case SDL_MOUSEBUTTONDOWN:
+                    m_mouseX = event.button.x;
+                    m_mouseY = event.button.y;
+                    if (event.button.button == SDL_BUTTON_LEFT)   m_mouseState |= kMouseLeft;
+                    if (event.button.button == SDL_BUTTON_RIGHT)  m_mouseState |= kMouseRight;
+                    if (event.button.button == SDL_BUTTON_MIDDLE) m_mouseState |= kMouseMiddle;
+                    m_mouseMoved = true;
+                    break;
+                case SDL_MOUSEBUTTONUP:
+                    m_mouseX = event.button.x;
+                    m_mouseY = event.button.y;
+                    if (event.button.button == SDL_BUTTON_LEFT)   m_mouseState &= ~kMouseLeft;
+                    if (event.button.button == SDL_BUTTON_RIGHT)  m_mouseState &= ~kMouseRight;
+                    if (event.button.button == SDL_BUTTON_MIDDLE) m_mouseState &= ~kMouseMiddle;
+                    m_mouseMoved = true;
+                    break;
+#if defined(SDL_2_0_5_BUILD)
+                case SDL_MOUSEWHEEL:
+                    m_wheelY = event.wheel.y;
+                    m_iWheelY = event.wheel.y;
+                    break;
+#else
+                case SDL_MOUSEBUTTONDOWN: // (jo käsitelty; wheel SDL1.2:na)
+                    break;
+#endif
+                default:
+                    break;
+            }
+        }
+
+        // Päivitä spin-arvot hiiren sijainnin perusteella
+        int w = 0, h = 0;
+#if defined(SDL_2_0_5_BUILD)
+        SDL_Window* win = STX_Service::GetSDLWindow();
+        if (win) SDL_GetWindowSize(win, &w, &h);
+#else
+        const SDL_VideoInfo* vi = SDL_GetVideoInfo();
+        if (vi) { w = vi->current_w; h = vi->current_h; }
+#endif
+        float fx = 0, fy = 0;
+        STX_UpdateSpinFromMouse((float)m_mouseX, (float)m_mouseY,
+                                (float)w, (float)h, fx, fy);
+        m_fX = fx; m_fY = fy;
+        if (IsMouseButtonPressed(STX_MBUTTON_LEFT)) {
+            m_fSpinX = fx; m_fSpinY = fy;
+            m_fSpinX_L = fx; m_fSpinY_L = fy;
+        }
+        if (IsMouseButtonPressed(STX_MBUTTON_RIGHT)) {
+            m_fSpinX_R = fx; m_fSpinY_R = fy;
+        }
+        if (IsMouseButtonPressed(STX_MBUTTON_WHEELDOWN))
+            m_fZ = fy;
+
+        return false;
+    }
+
+    virtual bool OnShiftKeyPress()  { return (m_mods & STX_KMOD_SHIFT) != 0; }
+    virtual bool OnLShiftKeyPress() { return (m_mods & STX_KMOD_LSHIFT) != 0; }
+    virtual bool OnRShiftKeyPress() { return (m_mods & STX_KMOD_RSHIFT) != 0; }
+    virtual bool OnCTRLKeyPress()   { return (m_mods & STX_KMOD_CTRL) != 0; }
+    virtual bool OnLCTRLKeyPress()  { return (m_mods & STX_KMOD_LCTRL) != 0; }
+    virtual bool OnRCTRLKeyPress()  { return (m_mods & STX_KMOD_RCTRL) != 0; }
+    virtual bool OnALTKeyPress()    { return (m_mods & STX_KMOD_ALT) != 0; }
+    virtual bool OnLALTKeyPress()   { return (m_mods & STX_KMOD_LALT) != 0; }
+    virtual bool OnRALTKeyPress()   { return (m_mods & STX_KMOD_RALT) != 0; }
+    virtual bool OnNUMKeyPress()    { return (m_mods & STX_KMOD_NUM) != 0; }
+    virtual bool OnCAPSKeyPress()   { return (m_mods & STX_KMOD_CAPS) != 0; }
+    virtual bool OnMODEKeyPress()   { return (m_mods & STX_KMOD_MODE) != 0; }
+
+private:
+    const Uint8* m_keyboardState;
+};
+
+// SDLKtoKEY-käännös (sama kuin alkuperäisessä, mutta tässä ytimekkäämmin)
+static eKey SDLKtoKEY(int key)
+{
+    // Koska eKey-arvot on määritelty SDLK_-makrolla,
+    // voimme suoraan palauttaa vastaavan arvon, jos se löytyy.
+    // Käytännössä: käydään läpi tunnetut arvot.
+    switch (key) {
+        #define K(x) case SDLK_##x: return STX_KEY_##x;
+        K(UNKNOWN) K(BACKSPACE) K(TAB) K(CLEAR) K(RETURN) K(PAUSE)
+        K(ESCAPE) K(SPACE) K(EXCLAIM) K(QUOTEDBL) K(HASH) K(DOLLAR)
+        K(AMPERSAND) K(QUOTE) K(LEFTPAREN) K(RIGHTPAREN) K(ASTERISK)
+        K(PLUS) K(COMMA) K(MINUS) K(PERIOD) K(SLASH)
+        K(0) K(1) K(2) K(3) K(4) K(5) K(6) K(7) K(8) K(9)
+        K(COLON) K(SEMICOLON) K(LESS) K(EQUALS) K(GREATER) K(QUESTION) K(AT)
+        K(LEFTBRACKET) K(BACKSLASH) K(RIGHTBRACKET) K(CARET) K(UNDERSCORE) K(BACKQUOTE)
+        K(a) K(b) K(c) K(d) K(e) K(f) K(g) K(h) K(i) K(j) K(k) K(l) K(m)
+        K(n) K(o) K(p) K(q) K(r) K(s) K(t) K(u) K(v) K(w) K(x) K(y) K(z)
+        K(DELETE)
+#if !defined(SDL_2_0_5_BUILD)
+        K(KP0) K(KP1) K(KP2) K(KP3) K(KP4) K(KP5) K(KP6) K(KP7) K(KP8) K(KP9)
+#endif
+        K(KP_PERIOD) K(KP_DIVIDE) K(KP_MULTIPLY) K(KP_MINUS) K(KP_PLUS)
+        K(KP_ENTER) K(KP_EQUALS)
+        K(UP) K(DOWN) K(RIGHT) K(LEFT) K(INSERT) K(HOME) K(END)
+        K(PAGEUP) K(PAGEDOWN)
+        K(F1) K(F2) K(F3) K(F4) K(F5) K(F6) K(F7) K(F8) K(F9) K(F10)
+        K(F11) K(F12) K(F13) K(F14) K(F15)
+#if !defined(SDL_2_0_5_BUILD)
+        K(NUMLOCK) K(SCROLLOCK) K(RSUPER) K(PRINT) K(BREAK)
+#endif
+        K(CAPSLOCK) K(RSHIFT) K(LSHIFT) K(RCTRL) K(LCTRL) K(RALT) K(LALT)
+        K(HELP) K(SYSREQ) K(MENU)
+        #undef K
+        default: break;
+    }
+    return STX_KEY_UNKNOWN;
+}
+
+// ============================================================
+// 4) Muut alustat: DummyInput (fallback)
+// ============================================================
+#else
+
+class GenericDummyInput : public PlatformInput
+{
+public:
+    GenericDummyInput() : PlatformInput() {}
+    virtual bool Update() { ClearFrame(); return m_quit; }
+};
+
+#endif
+
+// ============================================================
+// Factory: STX_Service::GetInputInstance
+// ============================================================
+IInput* STX_Service::s_pInput = NULL;
+
+IInput* STX_Service::GetInputInstance(tInput a)
+{
+    if (s_pInput) return s_pInput;
+
+#if defined(__ANDROID__) && !defined(SDL_2_0_5_BUILD)
+    (void)a;
+    s_pInput = new AndroidInput();
+#elif defined(__APPLE__) && !defined(SDL_2_0_5_BUILD)
+    (void)a;
+    s_pInput = new IosInput();
+#elif defined(SDL_1_2_15_BUILD) || defined(SDL_2_0_5_BUILD)
+    (void)a;
+    s_pInput = new SDLInputImpl();
+#else
+    (void)a;
+    s_pInput = new GenericDummyInput();
+#endif
+    return s_pInput;
+}
+
+void STX_Service::CloseInput()
+{
+    if (s_pInput) { s_pInput->Shutdown(); delete s_pInput; s_pInput = NULL; }
+}
+```
+
+---
+
+## 3. Lisäosat alustoille
+
+### Android — `InputBridge.java`
+
+```java
+package fi.tommironty.STX;
+
+import android.app.Activity;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.inputmethod.InputMethodManager;
+import android.content.Context;
+
+public class InputBridge {
+    static {
+        System.loadLibrary("stxinput");
+    }
+    private static native void nativeKeyEvent(int action, int keycode, int metaState);
+    private static native void nativeTouchEvent(int action, int pointerIndex,
+                                                int pointerId, float x, float y);
+    private static native void nativeTextInput(String text);
+
+    // Asenna Activityyn:
+    public static void install(final Activity activity) {
+        View v = activity.getWindow().getDecorView();
+        v.setOnKeyListener(new View.OnKeyListener() {
+            @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
+                nativeKeyEvent(event.getAction(), keyCode, event.getMetaState());
+                return false;
+            }
+        });
+        v.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View v, MotionEvent ev) {
+                int action = ev.getActionMasked();
+                int idx = ev.getActionIndex();
+                int id = ev.getPointerId(idx);
+                float x = ev.getX(idx), y = ev.getY(idx);
+                nativeTouchEvent(action, idx, id, x, y);
+                return false;
+            }
+        });
+    }
+}
+```
+
+### iOS — `InputBridge.mm`
+
+```objc
+#import <UIKit/UIKit.h>
+extern "C" {
+    void STX_iOS_Touch(int phase, int touchId, float x, float y);
+    void STX_iOS_Key(int down, int keycode, int mods);
+    void STX_iOS_Text(const char* utf8);
+}
+
+@interface STXInputView : UIView
+@end
+
+@implementation STXInputView
+- (void)touchesBegan:(NSSet*)touches withEvent:(UIEvent*)ev {
+    for (UITouch* t in touches) {
+        CGPoint p = [t locationInView:self];
+        STX_iOS_Touch(0, (int)(intptr_t)t, p.x, p.y);
+    }
+}
+- (void)touchesMoved:(NSSet*)touches withEvent:(UIEvent*)ev {
+    for (UITouch* t in touches) {
+        CGPoint p = [t locationInView:self];
+        STX_iOS_Touch(1, (int)(intptr_t)t, p.x, p.y);
+    }
+}
+- (void)touchesEnded:(NSSet*)touches withEvent:(UIEvent*)ev {
+    for (UITouch* t in touches) {
+        CGPoint p = [t locationInView:self];
+        STX_iOS_Touch(2, (int)(intptr_t)t, p.x, p.y);
+    }
+}
+- (void)touchesCancelled:(NSSet*)touches withEvent:(UIEvent*)ev {
+    for (UITouch* t in touches) {
+        CGPoint p = [t locationInView:self];
+        STX_iOS_Touch(3, (int)(intptr_t)t, p.x, p.y);
+    }
+}
+@end
+```
+
+---
+
+## Yhteenveto muutoksista
+
+| Alue | Ennen | Jälkeen |
+|------|-------|---------|
+| **eKey-enum** | Sidottu `SDLK_*`-makroon | `STX_KEYVAL()`-makro valitsee SDL:n tai itsenäisen arvon |
+| **STX_Keymod** | Sidottu `KMOD_*`-vakioihin | Itsenäinen enum, SDL-yhteensopivin arvoin |
+| **eKeyButton, eJoyButton, eMouseEvent, eMouseButton** | Osa SDL:ää | Itsenäisiä |
+| **IInput** | Oli jo alustariippumaton | Lisätty kosketus- ja tekstinsyöttömetodit (oletustoteutus) |
+| **Toteutus** | Vain SDLInput + DummyInput | `PlatformInput`-kanta + `AndroidInput`, `IosInput`, `SDLInputImpl`, `GenericDummyInput` |
+| **Factory** | SDL/Dummy-valinta | Valitsee oikean alustan `#if defined(__ANDROID__)` / `__APPLE__` / `SDL_*` |
+
+**Keskeiset edut:**
+1. Sama `IInput`-rajapinta kaikilla alustoilla → pelikoodi ei muutu.
+2. Android/iOS eivät tarvitse SDL:ää → kevyempi ja helpompi integroida GLES2-renderöintiin.
+3. SDL2-toteutus säilyy työpöydällä (Linux/Windows/OSX).
+4. `eKey`-arvojen numeeriset vakiot ovat SDL1.2-yhteensopivia, joten vanha koodi toimii sellaisenaan.
+5. Kosketus ja monikosketus (multi-touch) tuetaan Androidilla ja iOS:llä.
+6. Tekstinsyöttö (IME) tuetaan kaikilla alustoilla.
